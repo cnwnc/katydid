@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -353,7 +354,7 @@ type rc struct {
 var getRuntimeOnce = sync.OnceValues(func() (rc, error) {
 	ctx := context.Background()
 
-	cacheDir := filepath.Join(os.TempDir(), "go-taglib-wasm")
+	cacheDir := filepath.Join(os.TempDir(), "go-taglib-wasm", strconv.Itoa(os.Geteuid()))
 	compilationCache, err := wazero.NewCompilationCacheWithDir(cacheDir)
 	if err != nil {
 		return rc{}, err
