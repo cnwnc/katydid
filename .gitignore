@@ -1,0 +1,6 @@
+scratch/
+.direnv/
+result
+result-*
+*.test
+CODEX.md
