@@ -143,3 +143,15 @@ func (c *Client) doWithBody(method, path string, body []byte, out any) error {
 	}
 	return nil
 }
+
+func (c *Client) Resolve(artist, album string, year int, mbid string) (api.ResolveResponse, error) {
+	params := []string{"artist=" + url.QueryEscape(artist), "album=" + url.QueryEscape(album)}
+	if year != 0 {
+		params = append(params, "year="+fmt.Sprint(year))
+	}
+	if mbid != "" {
+		params = append(params, "mbid="+url.QueryEscape(mbid))
+	}
+	var out api.ResolveResponse
+	return out, c.get("/resolve?"+strings.Join(params, "&"), &out)
+}
