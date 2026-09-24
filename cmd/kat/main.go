@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -20,15 +21,13 @@ const usage = `kat: query the katydid library daemon
 usage:
   kat status
   kat scan
-  kat list [query] [-artist=] [-year=] [-json]
+  kat list [query] [-artist=] [-year=] [-json] [-format=]
   kat show <album-id> [-json]
   kat check [-json]
   kat import <dir> [-artist=] [-album=] [-year=] [-pick=N] [-skip] [-replace]
               [-by=] [-request="..."]
   kat decide <token> <N|skip>
   kat retag [-all | <album-id>] [-policy=]
-
-flags use -name=value; boolean flags stand alone.
 
 environment:
   KATYDID_SOCKET  unix socket path (default /tmp/katyd.sock)`
@@ -99,14 +98,44 @@ func runScan(client *cli.Client) error {
 	return nil
 }
 
+const defaultListFormat = "{year} {artist} - {album}"
+
+var formatFieldRe = regexp.MustCompile(`\{([a-z]+)\}`)
+
+func renderAlbumFormat(template string, album library.Album) (string, error) {
+	year := ""
+	if album.Meta.Year != 0 {
+		year = strconv.Itoa(album.Meta.Year)
+	}
+	fields := map[string]string{
+		"album":  album.Meta.Album,
+		"artist": album.Meta.AlbumArtist,
+		"path":   album.ID,
+		"tracks": strconv.Itoa(len(album.Meta.Tracks)),
+		"year":   year,
+	}
+	for _, match := range formatFieldRe.FindAllStringSubmatch(template, -1) {
+		if _, ok := fields[match[1]]; !ok {
+			return "", fmt.Errorf("unknown format field %q; fields are album, artist, path, tracks, year", match[1])
+		}
+	}
+	return strings.TrimSpace(formatFieldRe.ReplaceAllStringFunc(template, func(match string) string {
+		return fields[match[1:len(match)-1]]
+	})), nil
+}
+
 func runList(client *cli.Client, args []string) error {
 	flags := flag.NewFlagSet("list", flag.ExitOnError)
 	artist := flags.String("artist", "", "filter by albumartist substring")
 	year := flags.Int("year", 0, "filter by exact year")
 	asJSON := flags.Bool("json", false, "output raw json")
-	positional, rest := splitFlags(args, map[string]bool{"json": true})
+	format := flags.String("format", "", "line format, e.g. \""+defaultListFormat+"\"")
+	positional, rest := splitFlags(args, map[string]bool{"json": true, "format": true})
 	if err := flags.Parse(rest); err != nil {
 		return err
+	}
+	if *asJSON && *format != "" {
+		return errors.New("use -json or -format, not both")
 	}
 	query := library.Query{Q: strings.Join(positional, " "), Artist: *artist, Year: *year}
 
@@ -120,13 +149,16 @@ func runList(client *cli.Client, args []string) error {
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(albums)
 	}
+	template := *format
+	if template == "" {
+		template = defaultListFormat
+	}
 	for _, album := range albums.Albums {
-		state := ""
-		if album.Pending {
-			state = " [pending]"
+		line, err := renderAlbumFormat(template, album)
+		if err != nil {
+			return err
 		}
-		fmt.Printf("%s  %d  %s — %s (%d tracks)%s\n",
-			album.ID, album.Meta.Year, album.Meta.AlbumArtist, album.Meta.Album, len(album.Meta.Tracks), state)
+		fmt.Println(line + pendingMark(album))
 	}
 	return nil
 }
