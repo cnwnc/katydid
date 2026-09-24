@@ -193,12 +193,12 @@ func TestScanScratchIntegration(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 
-	if got := len(ix.Albums(Query{})); got != 3 {
-		t.Errorf("albums: got %d, want 3", got)
+	if got := len(ix.Albums(Query{})); got != 4 {
+		t.Errorf("albums: got %d, want 4", got)
 	}
 	status := ix.Status()
-	if status.Files != 50 {
-		t.Errorf("files: got %d, want 50", status.Files)
+	if status.Files != 62 {
+		t.Errorf("files: got %d, want 62", status.Files)
 	}
 
 	drukqs, err := ix.Album("Drukqs")
@@ -218,5 +218,16 @@ func TestScanScratchIntegration(t *testing.T) {
 	}
 	if saetia.Meta.Year != 1998 {
 		t.Errorf("saetia year from tags: got %d, want 1998", saetia.Meta.Year)
+	}
+
+	kikuo, err := ix.Album("きくおミク6")
+	if err != nil {
+		t.Fatalf("album (cjk id from tags): %v", err)
+	}
+	if !kikuo.Pending || kikuo.Meta.Year != 2019 || len(kikuo.Meta.Tracks) != 12 {
+		t.Errorf("kikuo: pending=%v year=%d tracks=%d", kikuo.Pending, kikuo.Meta.Year, len(kikuo.Meta.Tracks))
+	}
+	if kikuo.Meta.Tracks[0].Title != "学校に行った日のこと" {
+		t.Errorf("kikuo first track title from cjk tags: %q", kikuo.Meta.Tracks[0].Title)
 	}
 }

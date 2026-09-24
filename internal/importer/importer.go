@@ -17,6 +17,7 @@ import (
 	"doppel.moe/katydid/internal/library"
 	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/mb"
+	"doppel.moe/katydid/internal/safe"
 	"doppel.moe/katydid/internal/sidecar"
 	"doppel.moe/katydid/internal/tags"
 )
@@ -290,7 +291,7 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		notes = append(notes, fmt.Sprintf("release has no date, used file year %d", year))
 	}
 	albumTitle := release.Title
-	albumID = filepath.Join(sanitize(albumArtist), fmt.Sprintf("%d - %s", year, sanitize(albumTitle)))
+	albumID = filepath.Join(safe.Name(albumArtist, "Unknown Artist"), fmt.Sprintf("%d - %s", year, safe.Name(albumTitle, "Unknown Album")))
 	target := filepath.Join(root, albumID)
 
 	if _, err := os.Stat(target); err == nil {
@@ -303,7 +304,7 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		notes = append(notes, "previous album moved to .trash")
 	}
 
-	stage := filepath.Join(root, ".staging", fmt.Sprintf("%d-%s", time.Now().UnixNano(), sanitize(albumTitle)))
+	stage := filepath.Join(root, ".staging", fmt.Sprintf("%d-%s", time.Now().UnixNano(), safe.Name(albumTitle, "album")))
 	if err := os.MkdirAll(stage, 0o755); err != nil {
 		return "", nil, fmt.Errorf("create staging dir: %w", err)
 	}
@@ -500,17 +501,6 @@ func trash(root, target string) error {
 		return fmt.Errorf("move %s to trash: %w", target, err)
 	}
 	return nil
-}
-
-func sanitize(name string) string {
-	cleaned := strings.Map(func(r rune) rune {
-		switch r {
-		case '/', 0:
-			return '-'
-		}
-		return r
-	}, name)
-	return strings.TrimSpace(cleaned)
 }
 
 func firstNonEmpty(values ...string) string {

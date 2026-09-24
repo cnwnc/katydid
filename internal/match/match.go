@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
+
 	"doppel.moe/katydid/internal/mb"
 )
 
@@ -237,6 +239,7 @@ func trigrams(s string) map[string]struct{} {
 }
 
 func normalize(s string) string {
+	s = norm.NFC.String(s)
 	var builder strings.Builder
 	lastSpace := true
 	for _, ch := range strings.ToLower(s) {
