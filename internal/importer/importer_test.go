@@ -349,7 +349,7 @@ func TestImportMissingDir(t *testing.T) {
 }
 
 func TestImportAppliesPolicy(t *testing.T) {
-startMB(t, autoFixture())
+	startMB(t, autoFixture())
 	root := t.TempDir()
 	src := twoTestFiles(t)
 	manager := newManager(t, root)
@@ -412,7 +412,7 @@ startMB(t, autoFixture())
 }
 
 func TestImportScrubbsUnmanagedTags(t *testing.T) {
-startMB(t, autoFixture())
+	startMB(t, autoFixture())
 	src := twoTestFiles(t)
 	first := filepath.Join(src, "01 - First Song.flac")
 	if err := taglib.WriteTags(first, map[string][]string{"COMMENT": {"ripped by someone"}}, 0); err != nil {
@@ -434,7 +434,7 @@ startMB(t, autoFixture())
 }
 
 func TestCheckDetectsDriftAfterExternalEdit(t *testing.T) {
-startMB(t, autoFixture())
+	startMB(t, autoFixture())
 	root := t.TempDir()
 	src := twoTestFiles(t)
 	manager := newManager(t, root)
@@ -465,7 +465,7 @@ startMB(t, autoFixture())
 }
 
 func TestRetagRestoresPolicyAndNames(t *testing.T) {
-startMB(t, autoFixture())
+	startMB(t, autoFixture())
 	root := t.TempDir()
 	src := twoTestFiles(t)
 	manager := newManager(t, root)
@@ -506,7 +506,7 @@ startMB(t, autoFixture())
 }
 
 func TestRetagAllSkipsPending(t *testing.T) {
-startMB(t, autoFixture())
+	startMB(t, autoFixture())
 	manager := newManager(t, t.TempDir())
 
 	// a pending album: audio files without sidecar, never imported
