@@ -84,12 +84,12 @@ func TestLoadToleratesUnknownFields(t *testing.T) {
 func TestSaveRejectsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]Album{
-		"empty album":        {AlbumArtist: "x", Tracks: []Track{{File: "a.flac", Title: "a"}}},
-		"empty albumartist":  {Album: "x", Tracks: []Track{{File: "a.flac", Title: "a"}}},
-		"no tracks":          {Album: "x", AlbumArtist: "y"},
-		"track missing file": {Album: "x", AlbumArtist: "y", Tracks: []Track{{Title: "a"}}},
+		"empty album":         {AlbumArtist: "x", Tracks: []Track{{File: "a.flac", Title: "a"}}},
+		"empty albumartist":   {Album: "x", Tracks: []Track{{File: "a.flac", Title: "a"}}},
+		"no tracks":           {Album: "x", AlbumArtist: "y"},
+		"track missing file":  {Album: "x", AlbumArtist: "y", Tracks: []Track{{Title: "a"}}},
 		"track missing title": {Album: "x", AlbumArtist: "y", Tracks: []Track{{File: "a.flac"}}},
-		"duplicate files":    {Album: "x", AlbumArtist: "y", Tracks: []Track{{File: "a.flac", Title: "a"}, {File: "a.flac", Title: "b"}}},
+		"duplicate files":     {Album: "x", AlbumArtist: "y", Tracks: []Track{{File: "a.flac", Title: "a"}, {File: "a.flac", Title: "b"}}},
 	}
 	for name, album := range cases {
 		if err := Save(dir, &album); err == nil {

@@ -1,0 +1,347 @@
+package importer
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"doppel.moe/katydid/internal/library"
+	"doppel.moe/katydid/internal/mb"
+	"doppel.moe/katydid/internal/mb/mbtest"
+	"doppel.moe/katydid/internal/sidecar"
+	"doppel.moe/katydid/internal/testaudio"
+)
+
+func searchBody(releases ...mb.SearchRelease) string {
+	out, _ := json.Marshal(struct {
+		Releases []mb.SearchRelease `json:"releases"`
+	}{Releases: releases})
+	return string(out)
+}
+
+func lookupBody(release mb.Release) string {
+	out, _ := json.Marshal(release)
+	return string(out)
+}
+
+type mbFixture struct {
+	search   []mb.SearchRelease
+	releases []mb.Release
+}
+
+var mbBase string
+
+func startMB(t *testing.T, fixture mbFixture) {
+	t.Helper()
+	server := mbtest.Custom(t, func(r *http.Request) (string, int) {
+		if r.URL.Path == "/ws/2/release" {
+			return searchBody(fixture.search...), http.StatusOK
+		}
+		if id, ok := strings.CutPrefix(r.URL.Path, "/ws/2/release/"); ok {
+			for _, release := range fixture.releases {
+				if release.ID == id {
+					return lookupBody(release), http.StatusOK
+				}
+			}
+		}
+		return `{"error": "no fixture"}`, http.StatusNotFound
+	})
+	mbBase = server.URL
+}
+
+func newManager(t *testing.T, root string) *Manager {
+	t.Helper()
+	client := mb.New(mbBase, "", false)
+	client.SetRequestInterval(time.Millisecond)
+	return New(library.NewIndex(root), client)
+}
+
+func twoTestFiles(t *testing.T) string {
+	t.Helper()
+	src := t.TempDir()
+	testaudio.MakeTracked(t, src, "01 - First Song.flac", "First Song", "Test Artist", "Test Album", 1, 1, 2001)
+	testaudio.MakeTracked(t, src, "02 - Second Song.flac", "Second Song", "Test Artist", "Test Album", 2, 1, 2001)
+	return src
+}
+
+func autoFixture() mbFixture {
+	return mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-1", "rg-1", "Test Album", "Test Artist", "2001-10-01", 2)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-1", "rg-1", "Test Album", "Test Artist", "2001-10-01",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+				}}),
+		},
+	}
+}
+
+func TestImportAuto(t *testing.T) {
+	startMB(t, autoFixture())
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src, By: "test", Request: "add Test Album by Test Artist"})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: got %q, want imported (%+v)", result.Status, result)
+	}
+	wantID := filepath.Join("Test Artist", "2001 - Test Album")
+	if result.AlbumID != wantID {
+		t.Errorf("album id: got %q, want %q", result.AlbumID, wantID)
+	}
+
+	sc, err := sidecar.Load(filepath.Join(root, wantID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if sc.Album != "Test Album" || sc.AlbumArtist != "Test Artist" || sc.Year != 2001 {
+		t.Errorf("sidecar meta: %s / %s / %d", sc.AlbumArtist, sc.Album, sc.Year)
+	}
+	if sc.MusicBrainz.ReleaseID != "rel-1" || sc.MusicBrainz.ReleaseGroupID != "rg-1" {
+		t.Errorf("sidecar mb ids: %+v", sc.MusicBrainz)
+	}
+	if len(sc.Tracks) != 2 || sc.Tracks[0].Title != "First Song" || sc.Tracks[0].Track != 1 || sc.Tracks[0].Disc != 1 {
+		t.Errorf("sidecar tracks: %+v", sc.Tracks)
+	}
+	if sc.Provenance.By != "test" || sc.Provenance.Request != "add Test Album by Test Artist" || sc.Provenance.Origin.Path != src {
+		t.Errorf("provenance: %+v", sc.Provenance)
+	}
+
+	index := library.NewIndex(root)
+	if err := index.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	albums := index.Albums(library.Query{})
+	if len(albums) != 1 || albums[0].Pending || albums[0].Meta.Album != "Test Album" {
+		t.Errorf("index after import: %+v", albums)
+	}
+
+	if _, err := os.Stat(filepath.Join(src, "01 - First Song.flac")); err != nil {
+		t.Errorf("source file removed: %v", err)
+	}
+}
+
+func TestImportNeedsDecisionPickAndSkip(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{
+			mbtest.SyntheticSearch("rel-1", "rg-1", "Test Album", "Other Artist", "2001", 5),
+			mbtest.SyntheticSearch("rel-2", "rg-2", "Test Album", "Test Artist", "2019-03-03", 2),
+		},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-1", "rg-1", "Test Album", "Other Artist", "2001",
+				mb.ReleaseMedia{Position: 1, TrackCount: 5}),
+			// the right release carries a mismatched year, so auto is refused
+			mbtest.SyntheticRelease("rel-2", "rg-2", "Test Album", "Test Artist", "2019-03-03",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+	ctx := context.Background()
+
+	result, err := manager.Import(ctx, Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusNeedsDecision {
+		t.Fatalf("status: got %q, want needs_decision", result.Status)
+	}
+	decision := result.Decision
+	if decision.Token == "" || len(decision.Candidates) == 0 {
+		t.Fatalf("decision: %+v", decision)
+	}
+	if decision.Candidates[0].ReleaseID != "rel-2" {
+		t.Errorf("top candidate: got %s, want rel-2 (artist matches)", decision.Candidates[0].ReleaseID)
+	}
+	if len(manager.Decisions()) != 1 {
+		t.Errorf("decisions list: got %d, want 1", len(manager.Decisions()))
+	}
+
+	if _, err := manager.Decide(ctx, decision.Token, 99, false); err == nil {
+		t.Errorf("pick out of range: got nil error, want failure")
+	}
+	if _, err := manager.Decide(ctx, "nope", 1, false); err == nil {
+		t.Errorf("unknown token: got nil error, want failure")
+	}
+
+	picked, err := manager.Decide(ctx, decision.Token, 1, false)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if picked.Status != statusImported || picked.AlbumID != filepath.Join("Test Artist", "2019 - Test Album") {
+		t.Errorf("picked: %+v", picked)
+	}
+	if len(manager.Decisions()) != 0 {
+		t.Errorf("decisions after pick: got %d, want 0", len(manager.Decisions()))
+	}
+
+	result, err = manager.Import(ctx, Request{Dir: src})
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if result.Status != statusNeedsDecision {
+		t.Fatalf("second status: got %q, want needs_decision", result.Status)
+	}
+	skipped, err := manager.Decide(ctx, result.Decision.Token, 0, true)
+	if err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	if skipped.Status != statusSkipped {
+		t.Errorf("skip status: got %q, want skipped", skipped.Status)
+	}
+	if len(manager.Decisions()) != 0 {
+		t.Errorf("decisions after skip: got %d, want 0", len(manager.Decisions()))
+	}
+}
+
+func TestImportReplaceConflict(t *testing.T) {
+	startMB(t, autoFixture())
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+	ctx := context.Background()
+
+	if _, err := manager.Import(ctx, Request{Dir: src}); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	_, err := manager.Import(ctx, Request{Dir: src})
+	if !errors.Is(err, ErrTargetExists) {
+		t.Fatalf("second import: got %v, want ErrTargetExists", err)
+	}
+
+	result, err := manager.Import(ctx, Request{Dir: src, Replace: true})
+	if err != nil {
+		t.Fatalf("replace import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("replace status: %q", result.Status)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".trash"))
+	if err != nil || len(entries) != 1 {
+		t.Errorf("trash: err=%v entries=%d", err, len(entries))
+	}
+}
+
+func TestImportMappingMultiDisc(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-md", "rg-md", "Test Album", "Test Artist", "2001", 6)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-md", "rg-md", "Test Album", "Test Artist", "2001",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 3, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "Alpha"), mbtest.Track(2, "Beta"), mbtest.Track(3, "Gamma"),
+				}},
+				mb.ReleaseMedia{Position: 2, Format: "CD", TrackCount: 3, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "Delta"), mbtest.Track(2, "Epsilon"), mbtest.Track(3, "Zeta"),
+				}}),
+		},
+	})
+
+	src := t.TempDir()
+	titles := []string{"Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"}
+	for i, title := range titles {
+		testaudio.MakeTracked(t, src, fmt.Sprintf("%02d - %s.flac", i+1, title), title, "Test Artist", "Test Album", i+1, 1, 2001)
+	}
+
+	manager := newManager(t, t.TempDir())
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: %q", result.Status)
+	}
+
+	sc, err := sidecar.Load(filepath.Join(manager.index.Root(), result.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 6 {
+		t.Fatalf("tracks: got %d, want 6", len(sc.Tracks))
+	}
+	if sc.Tracks[3].Title != "Delta" || sc.Tracks[3].Disc != 2 || sc.Tracks[3].Track != 1 {
+		t.Errorf("track 4 mapping: %+v", sc.Tracks[3])
+	}
+	if sc.Tracks[0].Disc != 1 || sc.Tracks[0].Track != 1 {
+		t.Errorf("track 1 mapping: %+v", sc.Tracks[0])
+	}
+}
+
+func TestImportMappingThroughDecisionWhenCountsDiffer(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-bonus", "rg-bonus", "Test Album", "Test Artist", "2001", 4)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-bonus", "rg-bonus", "Test Album", "Test Artist", "2001",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 4, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song (Remaster)"), mbtest.Track(2, "Second Song"),
+					mbtest.Track(3, "Bonus Track"), mbtest.Track(4, "Live Take"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+	ctx := context.Background()
+
+	result, err := manager.Import(ctx, Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusNeedsDecision {
+		t.Fatalf("status: got %q, want needs_decision (2 files vs 4 release tracks)", result.Status)
+	}
+
+	picked, err := manager.Decide(ctx, result.Decision.Token, 1, false)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if picked.Status != statusImported {
+		t.Fatalf("picked status: %q", picked.Status)
+	}
+
+	sc, err := sidecar.Load(filepath.Join(root, picked.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 2 {
+		t.Fatalf("tracks: got %d, want 2", len(sc.Tracks))
+	}
+	if sc.Tracks[0].Title != "First Song (Remaster)" || sc.Tracks[0].Track != 1 {
+		t.Errorf("key-mapped track 1: %+v", sc.Tracks[0])
+	}
+	if sc.Tracks[1].Title != "Second Song" || sc.Tracks[1].Track != 2 {
+		t.Errorf("key-mapped track 2: %+v", sc.Tracks[1])
+	}
+}
+
+func TestImportNoCandidates(t *testing.T) {
+	startMB(t, mbFixture{})
+	manager := newManager(t, t.TempDir())
+	src := twoTestFiles(t)
+	_, err := manager.Import(context.Background(), Request{Dir: src})
+	if err == nil || !strings.Contains(err.Error(), "no musicbrainz candidates") {
+		t.Errorf("import with no candidates: got %v, want explicit failure", err)
+	}
+}
+
+func TestImportMissingDir(t *testing.T) {
+	startMB(t, autoFixture())
+	manager := newManager(t, t.TempDir())
+	_, err := manager.Import(context.Background(), Request{Dir: "/nonexistent-dir-xyz"})
+	if err == nil {
+		t.Errorf("import missing dir: got nil error, want failure")
+	}
+}

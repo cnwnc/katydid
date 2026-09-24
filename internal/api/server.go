@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"strconv"
 
+	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
 )
 
 type Server struct {
-	Index *library.Index
+	Index  *library.Index
+	Import *importer.Manager
 }
 
 type StatusResponse struct {
@@ -40,6 +42,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /album", s.album)
 	mux.HandleFunc("POST /scan", s.scan)
 	mux.HandleFunc("GET /check", s.check)
+	mux.HandleFunc("POST /import", s.importStart)
+	mux.HandleFunc("POST /import/decide", s.importDecide)
+	mux.HandleFunc("GET /decisions", s.decisions)
 	return mux
 }
 
@@ -95,6 +100,77 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CheckResponse{Findings: s.Index.Check()})
+}
+
+func (s *Server) importStart(w http.ResponseWriter, r *http.Request) {
+	if s.Import == nil {
+		writeError(w, http.StatusServiceUnavailable, "import is not configured on this daemon")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req importer.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "decode request body: "+err.Error())
+		return
+	}
+	if req.Dir == "" {
+		writeError(w, http.StatusBadRequest, "dir is required")
+		return
+	}
+	result, err := s.Import.Import(r.Context(), req)
+	if err != nil {
+		writeImportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) importDecide(w http.ResponseWriter, r *http.Request) {
+	if s.Import == nil {
+		writeError(w, http.StatusServiceUnavailable, "import is not configured on this daemon")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req struct {
+		Token string `json:"token"`
+		Pick  int    `json:"pick"`
+		Skip  bool   `json:"skip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "decode request body: "+err.Error())
+		return
+	}
+	if req.Token == "" {
+		writeError(w, http.StatusBadRequest, "token is required")
+		return
+	}
+	result, err := s.Import.Decide(r.Context(), req.Token, req.Pick, req.Skip)
+	if err != nil {
+		writeImportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) decisions(w http.ResponseWriter, r *http.Request) {
+	if s.Import == nil {
+		writeJSON(w, http.StatusOK, struct{ Decisions []importer.Decision }{nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Decisions []importer.Decision `json:"decisions"`
+	}{s.Import.Decisions()})
+}
+
+func writeImportError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, importer.ErrTargetExists):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, importer.ErrNoDecision):
+		writeError(w, http.StatusNotFound, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {

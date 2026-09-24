@@ -13,7 +13,9 @@ import (
 	"syscall"
 
 	"doppel.moe/katydid/internal/api"
+	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
+	"doppel.moe/katydid/internal/mb"
 )
 
 func main() {
@@ -53,13 +55,14 @@ func run() error {
 	fmt.Fprintf(os.Stderr, "katyd %s: library %s, %d albums (%d pending), scanned in %.2fs\n",
 		status.Version, status.Library, status.Albums, status.Pending, status.ScanDuration)
 
+	manager := newImporter(index)
 	listener, err := listen(*socket)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(*socket)
 
-	server := &api.Server{Index: index}
+	server := &api.Server{Index: index, Import: manager}
 	httpServer := &http.Server{Handler: server.Handler()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -77,6 +80,18 @@ func run() error {
 		}
 		return fmt.Errorf("serve: %w", err)
 	}
+}
+
+func newImporter(index *library.Index) *importer.Manager {
+	mbBase := os.Getenv("KATYDID_MB")
+	cacheDir := os.Getenv("KATYDID_MB_CACHE")
+	if cacheDir == "" {
+		if user, err := os.UserCacheDir(); err == nil {
+			cacheDir = filepath.Join(user, "katydid", "mb")
+		}
+	}
+	noCache := os.Getenv("KATYDID_MB_NOCACHE") != ""
+	return importer.New(index, mb.New(mbBase, cacheDir, noCache))
 }
 
 func listen(socket string) (net.Listener, error) {

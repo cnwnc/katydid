@@ -32,6 +32,7 @@
           go
           gopls
           ffmpeg
+          jq
         ];
       };
     };

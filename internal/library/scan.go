@@ -26,6 +26,10 @@ var audioExtensions = map[string]bool{
 
 const scanWorkers = 8
 
+func IsAudio(name string) bool {
+	return audioExtensions[strings.ToLower(filepath.Ext(name))]
+}
+
 func scanRoot(root string) ([]Album, []error) {
 	dirs, err := albumDirs(root)
 	if err != nil {

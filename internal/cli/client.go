@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"doppel.moe/katydid/internal/api"
+	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
 )
 
@@ -66,6 +68,21 @@ func (c *Client) Check() (api.CheckResponse, error) {
 	return out, c.get("/check", &out)
 }
 
+func (c *Client) Import(req importer.Request) (importer.Result, error) {
+	var out importer.Result
+	return out, c.postJSON("/import", req, &out)
+}
+
+func (c *Client) Decide(token string, pick int, skip bool) (importer.Result, error) {
+	body := struct {
+		Token string `json:"token"`
+		Pick  int    `json:"pick"`
+		Skip  bool   `json:"skip"`
+	}{Token: token, Pick: pick, Skip: skip}
+	var out importer.Result
+	return out, c.postJSON("/import/decide", body, &out)
+}
+
 func (c *Client) get(path string, out any) error {
 	return c.do(http.MethodGet, path, out)
 }
@@ -74,10 +91,25 @@ func (c *Client) post(path string, out any) error {
 	return c.do(http.MethodPost, path, out)
 }
 
+func (c *Client) postJSON(path string, body, out any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	return c.doWithBody(http.MethodPost, path, data, out)
+}
+
 func (c *Client) do(method, path string, out any) error {
-	req, err := http.NewRequest(method, "http://katydid"+path, nil)
+	return c.doWithBody(method, path, nil, out)
+}
+
+func (c *Client) doWithBody(method, path string, body []byte, out any) error {
+	req, err := http.NewRequest(method, "http://katydid"+path, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request %s %s: %w", method, path, err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
