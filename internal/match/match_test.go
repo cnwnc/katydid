@@ -112,6 +112,36 @@ func TestSimilarity(t *testing.T) {
 	}
 }
 
+func TestSpecifierAuto(t *testing.T) {
+	strong := Candidate{Score: 0.95, TitleSim: 1, ArtistSim: 1, YearSim: 1}
+	if !SpecifierAuto(strong, 0) {
+		t.Errorf("near-exact names should auto")
+	}
+	if !SpecifierAuto(strong, 1998) {
+		t.Errorf("agreeing year should auto")
+	}
+	weakTitle := Candidate{Score: 1, TitleSim: 0.8, ArtistSim: 1}
+	if SpecifierAuto(weakTitle, 0) {
+		t.Errorf("title below 0.90 should not auto from specifier alone")
+	}
+	weakArtist := Candidate{Score: 1, TitleSim: 1, ArtistSim: 0.85}
+	if SpecifierAuto(weakArtist, 0) {
+		t.Errorf("artist below 0.90 should not auto from specifier alone")
+	}
+	wrongYear := Candidate{Score: 1, TitleSim: 1, ArtistSim: 1, YearSim: 0.2}
+	if SpecifierAuto(wrongYear, 2001) {
+		t.Errorf("requested year disagreement should block auto")
+	}
+	noYear := Candidate{Score: 1, TitleSim: 1, ArtistSim: 1, YearSim: 0.5}
+	if !SpecifierAuto(noYear, 0) {
+		t.Errorf("no requested year should not block auto")
+	}
+	zeroCount := Candidate{Score: 0.95, TitleSim: 1, ArtistSim: 1, TrackCountSim: 0.5}
+	if !SpecifierAuto(zeroCount, 0) {
+		t.Errorf("track count is unknowable from a bare specifier and must not gate")
+	}
+}
+
 func TestAutoThresholdBoundaries(t *testing.T) {
 	ev := Evidence{Artist: "x", Album: "y", Year: 2001, TrackCount: 10}
 	strong := Candidate{Score: AutoThreshold, TitleSim: 1, TrackCountSim: 1, YearSim: 1}

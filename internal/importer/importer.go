@@ -168,6 +168,59 @@ func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool)
 	return &Result{Status: statusImported, AlbumID: albumID, Notes: notes}, nil
 }
 
+// Resolve ranks musicbrainz candidates for a bare specifier (no files). Used
+// by the fetcher to choose what to search soulseek for; the import gate runs
+// later with real evidence.
+func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, mbid string) ([]match.Candidate, error) {
+	if artist == "" || album == "" {
+		return nil, errors.New("artist and album are required")
+	}
+	if mbid != "" {
+		release, err := m.mb.LookupRelease(ctx, mbid)
+		if err != nil {
+			return nil, err
+		}
+		evidence := match.Evidence{Artist: artist, Album: album, Year: year}
+		return match.Rank(evidence, []mb.SearchRelease{searchFromRelease(release)}), nil
+	}
+	releases, err := m.mb.SearchReleases(ctx, mb.BuildQuery(artist, album))
+	if err != nil {
+		return nil, err
+	}
+	evidence := match.Evidence{Artist: artist, Album: album, Year: year}
+	ranked := match.Rank(evidence, releases)
+	const maxCandidates = 5
+	if len(ranked) > maxCandidates {
+		ranked = ranked[:maxCandidates]
+	}
+	return ranked, nil
+}
+
+func searchFromRelease(release *mb.Release) mb.SearchRelease {
+	search := mb.SearchRelease{
+		ID:           release.ID,
+		Score:        100,
+		Title:        release.Title,
+		Status:       release.Status,
+		Date:         release.Date,
+		ArtistCredit: release.ArtistCredit,
+	}
+	if release.ReleaseGroup != nil {
+		search.ReleaseGroup = &struct {
+			ID          string `json:"id"`
+			Title       string `json:"title"`
+			PrimaryType string `json:"primary-type"`
+		}{ID: release.ReleaseGroup.ID, Title: release.Title, PrimaryType: release.ReleaseGroup.PrimaryType}
+	}
+	for _, medium := range release.Media {
+		search.TrackCount += medium.TrackCount
+	}
+	if search.TrackCount == 0 {
+		search.TrackCount = len(release.FlattenedTracks())
+	}
+	return search
+}
+
 func (m *Manager) Decisions() []Decision {
 	m.mu.Lock()
 	defer m.mu.Unlock()

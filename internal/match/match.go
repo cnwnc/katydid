@@ -14,9 +14,25 @@ const (
 	AutoThreshold      = 0.90
 	AutoTitleSim       = 0.75
 	AutoTrackCountSim  = 0.80
+	SpecifierTitleSim  = 0.90
+	SpecifierArtistSim = 0.90
 	minSearchScore     = 40
 	maxAutoTrackTitles = 50
 )
+
+// SpecifierAuto gates an auto-pick made from a bare specifier alone (no file
+// evidence): names must be near-exact, and a requested year must agree. This
+// gates what to search soulseek for, not what to import; the import gate
+// still runs later with real files.
+func SpecifierAuto(c Candidate, year int) bool {
+	if c.TitleSim < SpecifierTitleSim || c.ArtistSim < SpecifierArtistSim {
+		return false
+	}
+	if year != 0 && c.YearSim < 0.4 {
+		return false
+	}
+	return true
+}
 
 type Evidence struct {
 	Artist      string   `json:"artist"`

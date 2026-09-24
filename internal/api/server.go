@@ -8,6 +8,7 @@ import (
 
 	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
+	"doppel.moe/katydid/internal/match"
 )
 
 type Server struct {
@@ -45,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /import", s.importStart)
 	mux.HandleFunc("POST /import/decide", s.importDecide)
 	mux.HandleFunc("GET /decisions", s.decisions)
+	mux.HandleFunc("GET /resolve", s.resolve)
 	mux.HandleFunc("POST /retag", s.retag)
 	return mux
 }
@@ -193,6 +195,37 @@ func (s *Server) retag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Results []importer.RetagResult `json:"results"`
 	}{[]importer.RetagResult{result}})
+}
+
+type ResolveResponse struct {
+	Candidates []match.Candidate `json:"candidates"`
+	Auto       bool              `json:"auto"`
+}
+
+func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
+	if s.Import == nil {
+		writeError(w, http.StatusServiceUnavailable, "import is not configured on this daemon")
+		return
+	}
+	artist := r.URL.Query().Get("artist")
+	album := r.URL.Query().Get("album")
+	mbid := r.URL.Query().Get("mbid")
+	year := 0
+	if raw := r.URL.Query().Get("year"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "year must be an integer")
+			return
+		}
+		year = parsed
+	}
+	candidates, err := s.Import.Resolve(r.Context(), artist, album, year, mbid)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	auto := len(candidates) > 0 && match.SpecifierAuto(candidates[0], year)
+	writeJSON(w, http.StatusOK, ResolveResponse{Candidates: candidates, Auto: auto})
 }
 
 func writeImportError(w http.ResponseWriter, err error) {
