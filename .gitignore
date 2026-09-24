@@ -1,6 +1,8 @@
-scratch/
+CODEX.md
 .direnv/
+kat
+katyd
 result
 result-*
+scratch/
 *.test
-CODEX.md
