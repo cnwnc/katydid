@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -351,22 +350,16 @@ type rc struct {
 	wazero.CompiledModule
 }
 
+// katydid patch: the upstream persistent compilation cache lives in a shared
+// /tmp directory and breaks when another user owns it. The daemon restarts
+// rarely, so compilation stays in memory.
 var getRuntimeOnce = sync.OnceValues(func() (rc, error) {
 	ctx := context.Background()
 
-	cacheDir := filepath.Join(os.TempDir(), "go-taglib-wasm", strconv.Itoa(os.Geteuid()))
-	compilationCache, err := wazero.NewCompilationCacheWithDir(cacheDir)
-	if err != nil {
-		return rc{}, err
-	}
-
-	runtime := wazero.NewRuntimeWithConfig(ctx,
-		wazero.NewRuntimeConfig().
-			WithCompilationCache(compilationCache),
-	)
+	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig())
 	wasi_snapshot_preview1.MustInstantiate(ctx, runtime)
 
-	_, err = runtime.
+	_, err := runtime.
 		NewHostModuleBuilder("env").
 		NewFunctionBuilder().WithFunc(func(int32) int32 { panic("__cxa_allocate_exception") }).Export("__cxa_allocate_exception").
 		NewFunctionBuilder().WithFunc(func(int32, int32, int32) { panic("__cxa_throw") }).Export("__cxa_throw").
