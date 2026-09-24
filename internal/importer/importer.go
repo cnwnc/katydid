@@ -93,7 +93,10 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	evidence := buildEvidence(files, req)
+	evidence, err := buildEvidence(files, req)
+	if err != nil {
+		return nil, err
+	}
 
 	releases, err := m.mb.SearchReleases(ctx, mb.BuildQuery(evidence.Artist, evidence.Album))
 	if err != nil {
@@ -176,7 +179,7 @@ func (m *Manager) Decisions() []Decision {
 	return out
 }
 
-func buildEvidence(files []sourceFile, req Request) match.Evidence {
+func buildEvidence(files []sourceFile, req Request) (match.Evidence, error) {
 	evidence := match.Evidence{
 		Artist: modalValue(files, func(t tags.Tags) string { return firstString(t.AlbumArtists, t.Artists) }),
 		Album:  modalValue(files, func(t tags.Tags) string { return t.Album }),
@@ -191,12 +194,29 @@ func buildEvidence(files []sourceFile, req Request) match.Evidence {
 	if req.Year != 0 {
 		evidence.Year = req.Year
 	}
+	if evidence.Artist == "" && evidence.Album == "" {
+		return evidence, fmt.Errorf("no artist or album tags in %s; provide -artist and -album hints", firstNonEmpty(req.Dir, "the source dir"))
+	}
 	evidence.TrackCount = len(files)
 	evidence.TrackTitles = make([]string, 0, len(files))
 	for _, file := range sortFiles(files) {
-		evidence.TrackTitles = append(evidence.TrackTitles, file.tags.Title)
+		title := file.tags.Title
+		if title == "" {
+			title = titleFromFilename(file.base)
+		}
+		evidence.TrackTitles = append(evidence.TrackTitles, title)
 	}
-	return evidence
+	return evidence, nil
+}
+
+// titleFromFilename recovers a track title from "01 Notres Langues.flac".
+func titleFromFilename(base string) string {
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	trimmed := strings.TrimLeft(stem, " 0123456789-")
+	if trimmed == "" {
+		return stem
+	}
+	return strings.TrimSpace(trimmed)
 }
 
 func firstString(values []string, fallback []string) string {
@@ -700,7 +720,7 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 				if used[i] {
 					continue
 				}
-				if sim := match.Similarity(file.tags.Title, track.Title); sim > bestSim {
+				if sim := match.Similarity(firstNonEmpty(file.tags.Title, titleFromFilename(file.base)), track.Title); sim > bestSim {
 					best, bestSim = i, sim
 				}
 			}
@@ -883,7 +903,7 @@ func trackFromRelease(file stagedFile, releaseTrack mb.ReleaseTrack, disc int) s
 
 func trackFromFileOnly(file stagedFile) sidecar.Track {
 	artists := trackArtistsFromTags(file)
-	title := firstNonEmpty(file.tags.Title, strings.TrimSuffix(file.base, filepath.Ext(file.base)))
+	title := firstNonEmpty(file.tags.Title, titleFromFilename(file.base))
 	return sidecar.Track{
 		File:          file.base,
 		Title:         title,
