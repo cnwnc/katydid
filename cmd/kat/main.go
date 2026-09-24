@@ -20,13 +20,15 @@ const usage = `kat: query the katydid library daemon
 usage:
   kat status
   kat scan
-  kat list [query] [--artist=] [--year=] [--json]
-  kat show <album-id> [--json]
-  kat check [--json]
-  kat import <dir> [--artist=] [--album=] [--year=] [--pick=N] [--skip] [--replace]
-              [--by=] [--request="..."]
+  kat list [query] [-artist=] [-year=] [-json]
+  kat show <album-id> [-json]
+  kat check [-json]
+  kat import <dir> [-artist=] [-album=] [-year=] [-pick=N] [-skip] [-replace]
+              [-by=] [-request="..."]
   kat decide <token> <N|skip>
-  kat retag [--all | <album-id>] [--policy=]
+  kat retag [-all | <album-id>] [-policy=]
+
+flags use -name=value; boolean flags stand alone.
 
 environment:
   KATYDID_SOCKET  unix socket path (default /tmp/katyd.sock)`
@@ -319,10 +321,10 @@ func runRetag(client *cli.Client, args []string) error {
 		return err
 	}
 	if !*all && len(positional) != 1 {
-		return errors.New("usage: kat retag [--all | <album-id>] [--policy=]")
+		return errors.New("usage: kat retag [-all | <album-id>] [-policy=]")
 	}
 	if *all && len(positional) > 0 {
-		return errors.New("usage: kat retag takes an album id or --all, not both")
+		return errors.New("usage: kat retag takes an album id or -all, not both")
 	}
 
 	album := ""
@@ -355,7 +357,7 @@ func splitFlags(args []string, boolean map[string]bool) (positional, flagArgs []
 		}
 		flagArgs = append(flagArgs, arg)
 		name := strings.TrimLeft(arg, "-")
-		if boolean != nil && !boolean[name] && !strings.Contains(arg, "=") && i+1 < len(args) {
+		if !boolean[name] && !strings.Contains(arg, "=") && i+1 < len(args) {
 			i++
 			flagArgs = append(flagArgs, args[i])
 		}
