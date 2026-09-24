@@ -312,14 +312,12 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 	albumID = dir
 	target := filepath.Join(root, albumID)
 
+	if _, err := os.Stat(target); err == nil && !req.Replace {
+		return "", nil, fmt.Errorf("%w: %s (use replace to overwrite)", ErrTargetExists, albumID)
+	}
+	replaced := false
 	if _, err := os.Stat(target); err == nil {
-		if !req.Replace {
-			return "", nil, fmt.Errorf("%w: %s (use replace to overwrite)", ErrTargetExists, albumID)
-		}
-		if err := trash(root, target); err != nil {
-			return "", nil, err
-		}
-		notes = append(notes, "previous album moved to .trash")
+		replaced = true
 	}
 
 	stage := filepath.Join(root, ".staging", fmt.Sprintf("%d-%s", time.Now().UnixNano(), safe.Name(albumTitle, "album")))
@@ -366,16 +364,53 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		return "", nil, err
 	}
 
+	if replaced {
+		if err := trash(root, target); err != nil {
+			return "", nil, err
+		}
+		notes = append(notes, "previous album moved to .trash")
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return "", nil, err
 	}
 	if err := os.Rename(stage, target); err != nil {
+		if replaced {
+			if rerr := restoreFromTrash(root, target); rerr != nil {
+				return "", nil, fmt.Errorf("publish %s: %v (restore also failed: %v)", target, err, rerr)
+			}
+		}
 		return "", nil, fmt.Errorf("publish %s: %w", target, err)
 	}
 	if err := m.index.Scan(); err != nil {
 		return "", nil, fmt.Errorf("rescan after import: %w", err)
 	}
 	return albumID, notes, nil
+}
+
+// restoreFromTrash moves the most recent trash entry for a target back
+// into place. It is the safety net for a failed publish-after-trash.
+func restoreFromTrash(root, target string) error {
+	entries, err := os.ReadDir(filepath.Join(root, ".trash"))
+	if err != nil {
+		return err
+	}
+	suffix := "-" + filepath.Base(target)
+	bestName, bestTime := "", int64(-1)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), suffix) {
+			continue
+		}
+		prefix := strings.TrimSuffix(entry.Name(), suffix)
+		nanos, err := strconv.ParseInt(prefix, 10, 64)
+		if err != nil || nanos <= bestTime {
+			continue
+		}
+		bestName, bestTime = entry.Name(), nanos
+	}
+	if bestName == "" {
+		return fmt.Errorf("no trash entry for %s", filepath.Base(target))
+	}
+	return os.Rename(filepath.Join(root, ".trash", bestName), target)
 }
 
 func firstLabel(release *mb.Release) string {
@@ -729,6 +764,10 @@ func (m *Manager) Retag(albumID, policyName string) RetagResult {
 		return result
 	}
 	if err := os.Rename(stage, dir); err != nil {
+		if rerr := restoreFromTrash(root, dir); rerr != nil {
+			result.Error = fmt.Sprintf("publish %s: %v (restore also failed: %v)", dir, err, rerr)
+			return result
+		}
 		result.Error = fmt.Sprintf("publish %s: %v", dir, err)
 		return result
 	}
