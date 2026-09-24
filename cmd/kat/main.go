@@ -102,7 +102,7 @@ func runList(client *cli.Client, args []string) error {
 	artist := flags.String("artist", "", "filter by albumartist substring")
 	year := flags.Int("year", 0, "filter by exact year")
 	asJSON := flags.Bool("json", false, "output raw json")
-	positional, rest := splitFlags(args, nil)
+	positional, rest := splitFlags(args, map[string]bool{"json": true})
 	if err := flags.Parse(rest); err != nil {
 		return err
 	}
@@ -111,6 +111,9 @@ func runList(client *cli.Client, args []string) error {
 	albums, err := client.Albums(query)
 	if err != nil {
 		return err
+	}
+	if len(albums.Albums) == 0 {
+		return fmt.Errorf("nothing could be found matching query %q", describeQuery(query))
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(albums)
@@ -358,4 +361,21 @@ func splitFlags(args []string, boolean map[string]bool) (positional, flagArgs []
 		}
 	}
 	return positional, flagArgs
+}
+
+func describeQuery(query library.Query) string {
+	parts := []string{}
+	if query.Q != "" {
+		parts = append(parts, query.Q)
+	}
+	if query.Artist != "" {
+		parts = append(parts, "artist="+query.Artist)
+	}
+	if query.Year != 0 {
+		parts = append(parts, fmt.Sprintf("year=%d", query.Year))
+	}
+	if len(parts) == 0 {
+		return "the whole library (it has no albums yet)"
+	}
+	return strings.Join(parts, " ")
 }
