@@ -33,3 +33,28 @@ func MakeTracked(t *testing.T, dir, base, title, artist, album string, track, di
 		t.Fatalf("write tags %s: %v", path, err)
 	}
 }
+
+// MakeTrackedAlbum is MakeTracked with an explicit album artist, for
+// various-artists fixtures where the track artist and album artist differ.
+func MakeTrackedAlbum(t *testing.T, dir, base, title, trackArtist, albumArtist, album string, track, disc, year int) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "tags", "testdata", "short.flac"))
+	if err != nil {
+		t.Fatalf("read flac fixture: %v", err)
+	}
+	path := filepath.Join(dir, base)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	if err := taglib.WriteTags(path, map[string][]string{
+		"TITLE":       {title},
+		"ARTIST":      {trackArtist},
+		"ALBUMARTIST": {albumArtist},
+		"ALBUM":       {album},
+		"TRACKNUMBER": {fmt.Sprint(track)},
+		"DISCNUMBER":  {fmt.Sprint(disc)},
+		"DATE":        {fmt.Sprint(year)},
+	}, 0); err != nil {
+		t.Fatalf("write tags %s: %v", path, err)
+	}
+}

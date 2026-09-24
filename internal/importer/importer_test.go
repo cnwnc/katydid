@@ -386,8 +386,17 @@ func TestImportAppliesPolicy(t *testing.T) {
 	if got := raw["ARTIST"]; len(got) != 1 || got[0] != "Test Artist" {
 		t.Errorf("written artist: %v", got)
 	}
-	if got := raw["TRACKNUMBER"]; len(got) != 1 || got[0] != "1/2" {
+	if got := raw["TRACKNUMBER"]; len(got) != 1 || got[0] != "1" {
 		t.Errorf("written tracknumber: %v", got)
+	}
+	if got := raw["TRACKTOTAL"]; len(got) != 1 || got[0] != "2" {
+		t.Errorf("written tracktotal: %v", got)
+	}
+	if got := raw["MUSICBRAINZ_TRACKID"]; len(got) != 1 || got[0] != "rec-First Song" {
+		t.Errorf("written mb recording id: %v", got)
+	}
+	if got := raw["MUSICBRAINZ_RELEASETRACKID"]; len(got) != 1 || got[0] != "trk-First Song" {
+		t.Errorf("written mb release track id: %v", got)
 	}
 	if got := raw["MUSICBRAINZ_ALBUMID"]; len(got) != 1 || got[0] != "rel-1" {
 		t.Errorf("written mb album id: %v", got)
@@ -546,3 +555,90 @@ func TestRetagAllSkipsPending(t *testing.T) {
 }
 
 func libRoot(m *Manager) string { return m.index.Root() }
+
+func TestImportVariousArtists(t *testing.T) {
+	release := mbtest.SyntheticRelease("rel-va", "rg-va", "Test Split", "Various Artists", "2003-05-01",
+		mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+			creditTrack(1, "Song One", "Band A"),
+			creditFeaturingTrack(2, "Song Two", "Band B", "Band C"),
+		}})
+	release.ReleaseGroup.SecondaryTypes = []string{"Compilation"}
+	startMB(t, mbFixture{
+		search:   []mb.SearchRelease{mbtest.SyntheticSearch("rel-va", "rg-va", "Test Split", "Various Artists", "2003-05-01", 2)},
+		releases: []mb.Release{release},
+	})
+
+	src := t.TempDir()
+	testaudio.MakeTrackedAlbum(t, src, "01 - Song One.flac", "Song One", "Band A", "Various Artists", "Test Split", 1, 1, 2003)
+	testaudio.MakeTrackedAlbum(t, src, "02 - Song Two.flac", "Song Two", "Band B feat. Band C", "Various Artists", "Test Split", 2, 1, 2003)
+
+	manager := newManager(t, t.TempDir())
+	result, err := manager.Import(context.Background(), Request{Dir: src, By: "test"})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: %q (%+v)", result.Status, result)
+	}
+	if !strings.HasPrefix(result.AlbumID, "Various Artists/2003") {
+		t.Fatalf("album id: %q", result.AlbumID)
+	}
+	albumDir := filepath.Join(manager.index.Root(), result.AlbumID)
+
+	rawOne, err := taglib.ReadTags(filepath.Join(albumDir, "01 - Song One.flac"))
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if got := rawOne["COMPILATION"]; len(got) != 1 || got[0] != "1" {
+		t.Errorf("compilation flag: %v", got)
+	}
+	if got := rawOne["ALBUMARTIST"]; len(got) != 1 || got[0] != "Various Artists" {
+		t.Errorf("albumartist: %v", got)
+	}
+	if got := rawOne["ARTIST"]; len(got) != 1 || got[0] != "Band A" {
+		t.Errorf("track artist (mb credit wins over file tags): %v", got)
+	}
+	if got := rawOne["ARTISTS"]; len(got) != 1 || got[0] != "Band A" {
+		t.Errorf("track artists list: %v", got)
+	}
+	if got := rawOne["RELEASETYPE"]; len(got) != 1 || got[0] != "Album, Compilation" {
+		t.Errorf("releasetype: %v", got)
+	}
+
+	rawTwo, err := taglib.ReadTags(filepath.Join(albumDir, "02 - Song Two.flac"))
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if got := rawTwo["ARTIST"]; len(got) != 1 || got[0] != "Band B" {
+		t.Errorf("feat split on track credit: %v", got)
+	}
+	if got := rawTwo["ARTISTS"]; len(got) != 2 || got[0] != "Band B" || got[1] != "Band C" {
+		t.Errorf("feat artists preserved in plural: %v", got)
+	}
+
+	sc, err := sidecar.Load(albumDir)
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if !sc.Compilation {
+		t.Errorf("sidecar compilation flag unset")
+	}
+	if got := sc.Tracks[1].Artist; got != "Band B feat. Band C" {
+		t.Errorf("sidecar display credit: %q", got)
+	}
+}
+
+func creditTrack(position int, title, artist string) mb.ReleaseTrack {
+	track := mbtest.Track(position, title)
+	track.ArtistCredit = []mb.ArtistCredit{{Name: artist}}
+	return track
+}
+
+func creditFeaturingTrack(position int, title, main, featured string) mb.ReleaseTrack {
+	track := mbtest.Track(position, title)
+	track.ArtistCredit = []mb.ArtistCredit{
+		{Name: main, Joinphrase: " feat. "},
+		{Name: featured},
+	}
+	return track
+}

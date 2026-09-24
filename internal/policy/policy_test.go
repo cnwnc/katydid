@@ -44,21 +44,22 @@ func TestApplyWhitelistScrubs(t *testing.T) {
 func TestApplyFeatSplit(t *testing.T) {
 	p := defaultPolicy(t)
 	out := Apply(p, map[string][]string{
-		"ARTIST":      {"Charmer feat. See You At Six"},
-		"ALBUMARTIST": {"Self Esteem ft. someone, other & third"},
+		"ARTIST":       {"Charmer feat. See You At Six"},
+		"ARTISTS":      {"Charmer", "See You At Six"},
+		"ALBUMARTIST":  {"Self Esteem ft. someone, other & third"},
+		"ALBUMARTISTS": {"Self Esteem", "someone", "other", "third"},
 	})
-	wantArtist := []string{"Charmer", "See You At Six"}
-	if len(out["ARTIST"]) != 2 || out["ARTIST"][0] != wantArtist[0] || out["ARTIST"][1] != wantArtist[1] {
-		t.Errorf("artist split: %v", out["ARTIST"])
+	if got := out["ARTIST"]; len(got) != 1 || got[0] != "Charmer" {
+		t.Errorf("singular artist keeps primary only: %v", got)
 	}
-	wantAlbum := []string{"Self Esteem", "someone", "other", "third"}
-	if len(out["ALBUMARTIST"]) != 4 {
-		t.Errorf("albumartist split: %v", out["ALBUMARTIST"])
+	if got := out["ARTISTS"]; len(got) != 2 || got[0] != "Charmer" || got[1] != "See You At Six" {
+		t.Errorf("plural artists keep everyone: %v", got)
 	}
-	for i, want := range wantAlbum {
-		if out["ALBUMARTIST"][i] != want {
-			t.Errorf("albumartist[%d]: got %q, want %q", i, out["ALBUMARTIST"][i], want)
-		}
+	if got := out["ALBUMARTIST"]; len(got) != 1 || got[0] != "Self Esteem" {
+		t.Errorf("singular albumartist keeps primary only: %v", got)
+	}
+	if got := out["ALBUMARTISTS"]; len(got) != 4 {
+		t.Errorf("plural albumartists keep everyone: %v", got)
 	}
 
 	plain := Apply(p, map[string][]string{"ARTIST": {"Simon & Garfunkel"}})
@@ -68,9 +69,44 @@ func TestApplyFeatSplit(t *testing.T) {
 
 	noSplit := defaultPolicy(t)
 	noSplit.FeatSplit = false
-	kept := Apply(noSplit, map[string][]string{"ARTIST": {"A feat. B"}})
+	kept := Apply(noSplit, map[string][]string{
+		"ARTIST":  {"A feat. B"},
+		"ARTISTS": {"A", "B"},
+	})
 	if len(kept["ARTIST"]) != 1 || kept["ARTIST"][0] != "A feat. B" {
 		t.Errorf("feat_split=false must keep the raw value: %v", kept["ARTIST"])
+	}
+	if len(kept["ARTISTS"]) != 2 {
+		t.Errorf("plural artists survive regardless: %v", kept["ARTISTS"])
+	}
+}
+
+func TestApplyNavidromeCoverage(t *testing.T) {
+	p := defaultPolicy(t)
+	raw := map[string][]string{
+		"TITLE":                      {"x"},
+		"TRACKNUMBER":                {"3"},
+		"TRACKTOTAL":                 {"11"},
+		"DISCNUMBER":                 {"1"},
+		"DISCTOTAL":                  {"1"},
+		"ORIGINALDATE":               {"1998"},
+		"ORIGINALYEAR":               {"1998"},
+		"GENRE":                      {"screamo"},
+		"COMPILATION":                {"1"},
+		"RELEASETYPE":                {"Album"},
+		"ARTISTSORT":                 {"Saetia"},
+		"ALBUMARTISTSORT":            {"Saetia"},
+		"MUSICBRAINZ_RELEASETRACKID": {"rt-1"},
+		"REPLAYGAIN_TRACK_GAIN":      {"-7.00 dB"},
+	}
+	out := Apply(p, raw)
+	for _, key := range []string{"TRACKTOTAL", "DISCTOTAL", "ORIGINALDATE", "ORIGINALYEAR", "GENRE", "COMPILATION", "RELEASETYPE", "ARTISTSORT", "ALBUMARTISTSORT", "MUSICBRAINZ_RELEASETRACKID"} {
+		if _, ok := out[key]; !ok {
+			t.Errorf("%s was scrubbed, navidrome needs it", key)
+		}
+	}
+	if _, ok := out["REPLAYGAIN_TRACK_GAIN"]; ok {
+		t.Errorf("replaygain survived the scrub")
 	}
 }
 

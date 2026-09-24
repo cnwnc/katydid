@@ -62,6 +62,7 @@ type Result struct {
 type sourceFile struct {
 	path string
 	base string
+	ext  string
 	tags tags.Tags
 }
 
@@ -173,29 +174,6 @@ func (m *Manager) Decisions() []Decision {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Token < out[j].Token })
 	return out
-}
-
-func probeDir(dir string) ([]sourceFile, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	files := []sourceFile{}
-	for _, entry := range entries {
-		if entry.IsDir() || !library.IsAudio(entry.Name()) {
-			continue
-		}
-		base := entry.Name()
-		fileTags, err := tags.Read(filepath.Join(dir, base))
-		if err != nil {
-			return nil, fmt.Errorf("read tags %s: %w", filepath.Join(dir, base), err)
-		}
-		files = append(files, sourceFile{path: filepath.Join(dir, base), base: base, tags: fileTags})
-	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no audio files in %s", dir)
-	}
-	return files, nil
 }
 
 func buildEvidence(files []sourceFile, req Request) match.Evidence {
@@ -353,8 +331,19 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 	sc.MusicBrainz.Date = release.Date
 	sc.Label = firstLabel(release)
 	sc.CatalogNumber = firstCatalogNumber(release)
+	sc.AlbumArtists = distinctOr(mb.CreditList(release.ArtistCredit), []string{albumArtist})
+	sc.AlbumArtistSort = mb.SortName(release.ArtistCredit)
+	sc.OriginalDate = release.OriginalDate()
+	sc.ReleaseType = release.ReleaseType()
+	sc.Compilation = release.IsCompilation()
+	sc.Genres = release.TopGenres(1)
+	if len(sc.Genres) == 0 {
+		if genre := modalGenre(files); genre != "" {
+			sc.Genres = []string{genre}
+		}
+	}
 
-	renamed, err := applyTagsAndNames(stage, sc, pol)
+	renamed, err := applyTagsAndNames(stage, sc, pol, copied)
 	if err != nil {
 		return "", nil, err
 	}
@@ -433,13 +422,20 @@ func firstCatalogNumber(release *mb.Release) string {
 
 // applyTagsAndNames renames staged files to the policy template, writes the
 // policy payload into each file's tags, and records both in the sidecar.
-func applyTagsAndNames(stage string, sc *sidecar.Album, pol policy.Policy) ([]string, error) {
+// Track totals are per disc on multi-disc albums and album-wide otherwise.
+func applyTagsAndNames(stage string, sc *sidecar.Album, pol policy.Policy, staged []stagedFile) ([]string, error) {
 	notes := []string{}
 	discTotal := 0
+	perDisc := map[int]int{}
 	for _, track := range sc.Tracks {
 		if track.Disc > discTotal {
 			discTotal = track.Disc
 		}
+		perDisc[track.Disc]++
+	}
+	exts := map[string]string{}
+	for _, file := range staged {
+		exts[file.base] = file.ext
 	}
 
 	used := map[string]bool{}
@@ -449,7 +445,14 @@ func applyTagsAndNames(stage string, sc *sidecar.Album, pol policy.Policy) ([]st
 	for i := range sc.Tracks {
 		track := &sc.Tracks[i]
 		ext := filepath.Ext(track.File)
-		payload := payloadForTrack(sc, track, pol, len(sc.Tracks), discTotal)
+		if ext == "" {
+			ext = exts[track.File]
+		}
+		trackTotal := len(sc.Tracks)
+		if discTotal > 1 {
+			trackTotal = perDisc[track.Disc]
+		}
+		payload := payloadForTrack(sc, track, pol, trackTotal, discTotal)
 
 		planned, err := policy.PlanFilename(pol, track.Disc, track.Track, track.Title, ext, discTotal)
 		if err != nil {
@@ -489,20 +492,43 @@ func applyTagsAndNames(stage string, sc *sidecar.Album, pol policy.Policy) ([]st
 // metadata, then runs it through the policy. The result is the exact payload
 // written into the file.
 func payloadForTrack(sc *sidecar.Album, track *sidecar.Track, pol policy.Policy, trackTotal, discTotal int) map[string][]string {
-	artist := []string{sc.AlbumArtist}
-	if len(track.Artists) > 0 {
-		artist = track.Artists
+	artistDisplay := firstNonEmpty(track.Artist, sc.AlbumArtist)
+	artists := track.Artists
+	if len(artists) == 0 {
+		artists = []string{artistDisplay}
 	}
 	raw := map[string][]string{
 		"TITLE":       {track.Title},
-		"ARTIST":      artist,
+		"ARTIST":      {artistDisplay},
+		"ARTISTS":     artists,
 		"ALBUMARTIST": {sc.AlbumArtist},
 		"ALBUM":       {sc.Album},
-		"TRACKNUMBER": {fmt.Sprintf("%d/%d", track.Track, trackTotal)},
+		"TRACKNUMBER": {strconv.Itoa(track.Track)},
+		"TRACKTOTAL":  {strconv.Itoa(trackTotal)},
 		"DATE":        {firstNonEmpty(sc.MusicBrainz.Date, strconv.Itoa(sc.Year))},
 	}
 	if discTotal > 1 {
-		raw["DISCNUMBER"] = []string{fmt.Sprintf("%d/%d", track.Disc, discTotal)}
+		raw["DISCNUMBER"] = []string{strconv.Itoa(track.Disc)}
+		raw["DISCTOTAL"] = []string{strconv.Itoa(discTotal)}
+	}
+	if sc.AlbumArtistSort != "" {
+		raw["ALBUMARTISTSORT"] = []string{sc.AlbumArtistSort}
+	}
+	if track.ArtistSort != "" {
+		raw["ARTISTSORT"] = []string{track.ArtistSort}
+	}
+	if len(sc.Genres) > 0 {
+		raw["GENRE"] = sc.Genres
+	}
+	if sc.OriginalDate != "" {
+		raw["ORIGINALDATE"] = []string{sc.OriginalDate}
+		raw["ORIGINALYEAR"] = []string{sc.OriginalDate[:minInt(4, len(sc.OriginalDate))]}
+	}
+	if sc.ReleaseType != "" {
+		raw["RELEASETYPE"] = []string{sc.ReleaseType}
+	}
+	if sc.Compilation {
+		raw["COMPILATION"] = []string{"1"}
 	}
 	if sc.MusicBrainz.ReleaseID != "" {
 		raw["MUSICBRAINZ_ALBUMID"] = []string{sc.MusicBrainz.ReleaseID}
@@ -513,6 +539,9 @@ func payloadForTrack(sc *sidecar.Album, track *sidecar.Track, pol policy.Policy,
 	if track.RecordingID != "" {
 		raw["MUSICBRAINZ_TRACKID"] = []string{track.RecordingID}
 	}
+	if track.ReleaseTrackID != "" {
+		raw["MUSICBRAINZ_RELEASETRACKID"] = []string{track.ReleaseTrackID}
+	}
 	if sc.Label != "" {
 		raw["LABEL"] = []string{sc.Label}
 	}
@@ -522,8 +551,16 @@ func payloadForTrack(sc *sidecar.Album, track *sidecar.Track, pol policy.Policy,
 	return policy.Apply(pol, raw)
 }
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 type stagedFile struct {
 	base string
+	ext  string
 	tags tags.Tags
 }
 
@@ -534,9 +571,69 @@ func copyFiles(files []sourceFile, stage string) ([]stagedFile, error) {
 		if err := copyFile(file.path, dest); err != nil {
 			return nil, err
 		}
-		out = append(out, stagedFile{base: file.base, tags: file.tags})
+		out = append(out, stagedFile{base: file.base, ext: file.ext, tags: file.tags})
 	}
 	return out, nil
+}
+
+func probeDir(dir string) ([]sourceFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	files := []sourceFile{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		base := entry.Name()
+		ext := filepath.Ext(base)
+		if !library.IsAudio(base) {
+			if library.IsAudio(base + sniffedExt(filepath.Join(dir, base))) {
+				ext = sniffedExt(filepath.Join(dir, base))
+			} else {
+				continue
+			}
+		}
+		fileTags, err := tags.Read(filepath.Join(dir, base))
+		if err != nil {
+			return nil, fmt.Errorf("read tags %s: %w", filepath.Join(dir, base), err)
+		}
+		files = append(files, sourceFile{path: filepath.Join(dir, base), base: base, ext: ext, tags: fileTags})
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no audio files in %s", dir)
+	}
+	return files, nil
+}
+
+// sniffedExt identifies an audio file by content when the name carries no
+// usable extension. Returns "" when the bytes are unrecognized.
+func sniffedExt(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	header := make([]byte, 12)
+	read, err := file.Read(header)
+	if err != nil || read < 4 {
+		return ""
+	}
+	switch {
+	case string(header[0:4]) == "fLaC":
+		return ".flac"
+	case string(header[0:3]) == "ID3":
+		return ".mp3"
+	case string(header[0:4]) == "OggS":
+		return ".ogg"
+	case string(header[4:8]) == "ftyp":
+		return ".m4a"
+	case string(header[0:4]) == "RIFF" && read >= 12 && string(header[8:12]) == "WAVE":
+		return ".wav"
+	}
+	return ""
 }
 
 func copyFile(src, dest string) error {
@@ -577,15 +674,7 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 		out := make([]sidecar.Track, 0, len(ordered))
 		mediumOf := mediumPositions(release)
 		for i, file := range ordered {
-			out = append(out, sidecar.Track{
-				File:          file.base,
-				Title:         tracks[i].Title,
-				Track:         tracks[i].Position,
-				Disc:          mediumOf[i],
-				LengthSeconds: trackLength(tracks[i], file),
-				RecordingID:   tracks[i].ID,
-				Artists:       trackArtists(tracks[i], file),
-			})
+			out = append(out, trackFromRelease(file, tracks[i], mediumOf[i]))
 		}
 		return out, notes
 	}
@@ -621,26 +710,11 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 		}
 		if index < 0 {
 			unmatched++
-			out = append(out, sidecar.Track{
-				File:          file.base,
-				Title:         firstNonEmpty(file.tags.Title, strings.TrimSuffix(file.base, filepath.Ext(file.base))),
-				Track:         file.tags.TrackNumber,
-				Disc:          file.tags.DiscNumber,
-				LengthSeconds: file.tags.LengthSeconds,
-				Artists:       trackArtistsFromTags(file),
-			})
+			out = append(out, trackFromFileOnly(file))
 			continue
 		}
 		used[index] = true
-		out = append(out, sidecar.Track{
-			File:          file.base,
-			Title:         tracks[index].Title,
-			Track:         tracks[index].Position,
-			Disc:          mediumOf[index],
-			LengthSeconds: trackLength(tracks[index], file),
-			RecordingID:   tracks[index].ID,
-			Artists:       trackArtists(tracks[index], file),
-		})
+		out = append(out, trackFromRelease(file, tracks[index], mediumOf[index]))
 	}
 	if unmatched > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d tracks unmatched against the release, imported with file metadata", unmatched, len(ordered)))
@@ -714,11 +788,7 @@ func (m *Manager) Retag(albumID, policyName string) RetagResult {
 	payloads := make([]map[string][]string, 0, len(sc.Tracks))
 	for i := range sc.Tracks {
 		track := &sc.Tracks[i]
-		payload := track.Tags
-		if payload == nil {
-			payload = payloadForTrack(sc, track, pol, len(sc.Tracks), discTotal)
-			notes = append(notes, fmt.Sprintf("rebuilt payload for %s from sidecar fields", track.File))
-		}
+		payload := payloadForTrack(sc, track, pol, len(sc.Tracks), discTotal)
 
 		planned, err := policy.PlanFilename(pol, track.Disc, track.Track, track.Title, filepath.Ext(track.File), discTotal)
 		if err != nil {
@@ -792,21 +862,44 @@ func (m *Manager) RetagAll(policyName string) []RetagResult {
 	return results
 }
 
-func trackArtists(track mb.ReleaseTrack, file stagedFile) []string {
-	if credit := mb.CreditName(track.ArtistCredit); credit != "" {
-		return []string{credit}
+func trackFromRelease(file stagedFile, releaseTrack mb.ReleaseTrack, disc int) sidecar.Track {
+	credit := mb.CreditName(releaseTrack.ArtistCredit)
+	if credit == "" {
+		credit = firstNonEmpty(file.tags.Artists...)
 	}
-	return trackArtistsFromTags(file)
+	return sidecar.Track{
+		File:           file.base,
+		Title:          releaseTrack.Title,
+		Track:          releaseTrack.Position,
+		Disc:           disc,
+		LengthSeconds:  trackLength(releaseTrack, file),
+		Artist:         credit,
+		ArtistSort:     mb.SortName(releaseTrack.ArtistCredit),
+		Artists:        firstNonEmptyList(mb.CreditList(releaseTrack.ArtistCredit), trackArtistsFromTags(file)),
+		RecordingID:    releaseTrack.Recording.ID,
+		ReleaseTrackID: releaseTrack.ID,
+	}
 }
 
-func trackArtistsFromTags(file stagedFile) []string {
-	if len(file.tags.Artists) > 0 {
-		return file.tags.Artists
+func trackFromFileOnly(file stagedFile) sidecar.Track {
+	artists := trackArtistsFromTags(file)
+	title := firstNonEmpty(file.tags.Title, strings.TrimSuffix(file.base, filepath.Ext(file.base)))
+	return sidecar.Track{
+		File:          file.base,
+		Title:         title,
+		Track:         file.tags.TrackNumber,
+		Disc:          file.tags.DiscNumber,
+		LengthSeconds: file.tags.LengthSeconds,
+		Artist:        firstNonEmpty(artists...),
+		Artists:       artists,
 	}
-	if len(file.tags.AlbumArtists) > 0 {
-		return file.tags.AlbumArtists
+}
+
+func firstNonEmptyList(a, b []string) []string {
+	if len(a) > 0 {
+		return a
 	}
-	return nil
+	return b
 }
 
 func mediumPositions(release *mb.Release) []int {
@@ -856,4 +949,32 @@ func newToken() (string, error) {
 		return "", fmt.Errorf("generate token: %w", err)
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+func distinctOr(a, b []string) []string {
+	if len(a) > 0 {
+		return a
+	}
+	return b
+}
+
+func modalGenre(files []sourceFile) string {
+	return modalValue(files, func(t tags.Tags) string {
+		for _, genre := range t.Genres {
+			if strings.TrimSpace(genre) != "" {
+				return strings.TrimSpace(genre)
+			}
+		}
+		return ""
+	})
+}
+
+func trackArtistsFromTags(file stagedFile) []string {
+	if len(file.tags.Artists) > 0 {
+		return file.tags.Artists
+	}
+	if len(file.tags.AlbumArtists) > 0 {
+		return file.tags.AlbumArtists
+	}
+	return nil
 }

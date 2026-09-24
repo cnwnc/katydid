@@ -50,9 +50,10 @@ func SyntheticRelease(id, groupID, title, artist, date string, media ...mb.Relea
 		Date:   date,
 	}
 	release.ReleaseGroup = &struct {
-		ID           string   `json:"id"`
-		PrimaryType  string   `json:"primary-type"`
-		SecondaryIDs []string `json:"secondary-type-ids"`
+		ID               string   `json:"id"`
+		PrimaryType      string   `json:"primary-type"`
+		SecondaryTypes   []string `json:"secondary-types"`
+		FirstReleaseDate string   `json:"first-release-date"`
 	}{ID: groupID, PrimaryType: "Album"}
 	release.ArtistCredit = []mb.ArtistCredit{{Name: artist}}
 	release.Media = media
@@ -60,7 +61,12 @@ func SyntheticRelease(id, groupID, title, artist, date string, media ...mb.Relea
 }
 
 func Track(position int, title string) mb.ReleaseTrack {
-	return mb.ReleaseTrack{ID: "trk-" + title, Position: position, Number: fmt.Sprint(position), Title: title, Length: 60000}
+	track := mb.ReleaseTrack{ID: "trk-" + title, Position: position, Number: fmt.Sprint(position), Title: title, Length: 60000}
+	track.Recording.ID = "rec-" + title
+	track.Recording.Title = title
+	track.ArtistCredit = []mb.ArtistCredit{{Name: ""}}
+	track.ArtistCredit[0].Artist.Name = ""
+	return track
 }
 
 // JSON marshals any value for inline fixture bodies.

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +64,8 @@ type ArtistCredit struct {
 	Name       string `json:"name"`
 	Joinphrase string `json:"joinphrase"`
 	Artist     struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		SortName string `json:"sort-name"`
 	} `json:"artist"`
 }
 
@@ -78,6 +80,29 @@ func creditName(credits []ArtistCredit) string {
 		builder.WriteString(credit.Joinphrase)
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+// CreditList returns one entry per credited artist, in credit order.
+func CreditList(credits []ArtistCredit) []string {
+	out := []string{}
+	for _, credit := range credits {
+		name := credit.Name
+		if name == "" {
+			name = credit.Artist.Name
+		}
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// SortName returns the sort name of the first credited artist.
+func SortName(credits []ArtistCredit) string {
+	if len(credits) == 0 {
+		return ""
+	}
+	return credits[0].Artist.SortName
 }
 
 type labelRef struct {
@@ -117,6 +142,10 @@ type ReleaseTrack struct {
 	Title        string         `json:"title"`
 	Length       int64          `json:"length"`
 	ArtistCredit []ArtistCredit `json:"artist-credit"`
+	Recording    struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	} `json:"recording"`
 }
 
 type ReleaseMedia struct {
@@ -124,6 +153,11 @@ type ReleaseMedia struct {
 	Format     string         `json:"format"`
 	TrackCount int            `json:"track-count"`
 	Tracks     []ReleaseTrack `json:"tracks"`
+}
+
+type Genre struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
 }
 
 type Release struct {
@@ -134,16 +168,73 @@ type Release struct {
 	Country      string         `json:"country"`
 	ArtistCredit []ArtistCredit `json:"artist-credit"`
 	ReleaseGroup *struct {
-		ID           string   `json:"id"`
-		PrimaryType  string   `json:"primary-type"`
-		SecondaryIDs []string `json:"secondary-type-ids"`
+		ID               string   `json:"id"`
+		PrimaryType      string   `json:"primary-type"`
+		SecondaryTypes   []string `json:"secondary-types"`
+		FirstReleaseDate string   `json:"first-release-date"`
 	} `json:"release-group"`
 	LabelInfo []LabelInfo    `json:"label-info"`
+	Genres    []Genre        `json:"genres"`
 	Media     []ReleaseMedia `json:"media"`
 }
 
 func (r *Release) Artist() string {
 	return creditName(r.ArtistCredit)
+}
+
+// ReleaseType renders the release group's types for the RELEASETYPE tag.
+func (r *Release) ReleaseType() string {
+	if r.ReleaseGroup == nil {
+		return ""
+	}
+	parts := []string{}
+	if r.ReleaseGroup.PrimaryType != "" {
+		parts = append(parts, r.ReleaseGroup.PrimaryType)
+	}
+	parts = append(parts, r.ReleaseGroup.SecondaryTypes...)
+	return strings.Join(parts, ", ")
+}
+
+// IsCompilation reports whether the release is a various-artists compilation.
+func (r *Release) IsCompilation() bool {
+	if r.ReleaseGroup != nil {
+		for _, secondary := range r.ReleaseGroup.SecondaryTypes {
+			if secondary == "Compilation" {
+				return true
+			}
+		}
+	}
+	return r.Artist() == "Various Artists"
+}
+
+// OriginalDate returns the release group's first release date.
+func (r *Release) OriginalDate() string {
+	if r.ReleaseGroup == nil {
+		return ""
+	}
+	return r.ReleaseGroup.FirstReleaseDate
+}
+
+// TopGenres returns up to n genre names, most voted first.
+func (r *Release) TopGenres(n int) []string {
+	sorted := make([]Genre, len(r.Genres))
+	copy(sorted, r.Genres)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Count != sorted[j].Count {
+			return sorted[i].Count > sorted[j].Count
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	out := []string{}
+	for _, genre := range sorted {
+		if genre.Name != "" {
+			out = append(out, genre.Name)
+		}
+		if len(out) == n {
+			break
+		}
+	}
+	return out
 }
 
 func (r *Release) FlattenedTracks() []ReleaseTrack {
@@ -184,7 +275,7 @@ func (c *Client) SearchReleases(ctx context.Context, query string) ([]SearchRele
 }
 
 func (c *Client) LookupRelease(ctx context.Context, id string) (*Release, error) {
-	path := "/ws/2/release/" + url.PathEscape(id) + "?inc=recordings+artist-credits+release-groups&fmt=json"
+	path := "/ws/2/release/" + url.PathEscape(id) + "?inc=recordings+artist-credits+release-groups+genres&fmt=json"
 	var out Release
 	if err := c.get(ctx, path, &out); err != nil {
 		return nil, fmt.Errorf("lookup release %s: %w", id, err)

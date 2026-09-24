@@ -40,10 +40,13 @@ func Default() Config {
 			"default": {
 				Name: "default",
 				Keep: []string{
-					"TITLE", "ARTIST", "ALBUMARTIST", "ALBUM",
-					"TRACKNUMBER", "DISCNUMBER", "DATE", "ORIGINALDATE",
-					"GENRE", "LABEL", "CATALOGNUMBER",
-					"MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_TRACKID",
+					"TITLE", "ARTIST", "ARTISTS", "ALBUMARTIST", "ALBUMARTISTS",
+					"ARTISTSORT", "ALBUMARTISTSORT",
+					"ALBUM", "TRACKNUMBER", "TRACKTOTAL", "DISCNUMBER", "DISCTOTAL",
+					"DATE", "ORIGINALDATE", "ORIGINALYEAR",
+					"GENRE", "LABEL", "CATALOGNUMBER", "COMPILATION", "RELEASETYPE",
+					"MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID",
+					"MUSICBRAINZ_TRACKID", "MUSICBRAINZ_RELEASETRACKID",
 				},
 				FeatSplit: true,
 				Dir:       "{albumartist}/{year} - {album}",
@@ -115,9 +118,11 @@ func (c Config) Policy(name string) (Policy, error) {
 var featPattern = regexp.MustCompile(`(?i)^(.+?)\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$`)
 var featSeparator = regexp.MustCompile(`(?i)\s*(?:,\s*|\s&\s|\sand\s)`)
 
-// Apply selects the keep-list keys from a raw tag map, splits featuring
-// artists out of artist fields, and returns the managed payload. Any key
-// outside the keep list is dropped, which is the scrub.
+// Apply selects the keep-list keys from a raw tag map, applies featuring
+// handling, and returns the managed payload. Any key outside the keep list
+// is dropped, which is the scrub. With feat_split on, the singular artist
+// tags keep only the primary artist; the plural ARTISTS/ALBUMARTISTS tags
+// carry every credited artist for players that link them separately.
 func Apply(p Policy, in map[string][]string) map[string][]string {
 	out := map[string][]string{}
 	for _, key := range p.Keep {
@@ -129,15 +134,19 @@ func Apply(p Policy, in map[string][]string) map[string][]string {
 		if len(values) == 0 {
 			continue
 		}
-		if p.FeatSplit && (key == "ARTIST" || key == "ALBUMARTIST") {
-			values = splitFeats(values)
+		switch {
+		case p.FeatSplit && (key == "ARTIST" || key == "ALBUMARTIST"):
+			out[key] = primaryArtists(values)
+		case key == "ARTISTS" || key == "ALBUMARTISTS":
+			out[key] = dedupe(values)
+		default:
+			out[key] = values
 		}
-		out[key] = values
 	}
 	return out
 }
 
-func splitFeats(values []string) []string {
+func primaryArtists(values []string) []string {
 	out := []string{}
 	for _, value := range values {
 		m := featPattern.FindStringSubmatch(value)
@@ -146,11 +155,6 @@ func splitFeats(values []string) []string {
 			continue
 		}
 		out = append(out, strings.TrimSpace(m[1]))
-		for _, rest := range featSeparator.Split(m[2], -1) {
-			if rest = strings.TrimSpace(rest); rest != "" {
-				out = append(out, rest)
-			}
-		}
 	}
 	return dedupe(out)
 }
