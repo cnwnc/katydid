@@ -10,13 +10,17 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	taglib "go.senan.xyz/taglib"
+
 	"doppel.moe/katydid/internal/library"
 	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/mb"
+	"doppel.moe/katydid/internal/policy"
 	"doppel.moe/katydid/internal/safe"
 	"doppel.moe/katydid/internal/sidecar"
 	"doppel.moe/katydid/internal/tags"
@@ -281,6 +285,15 @@ func sortFiles(files []sourceFile) []sourceFile {
 
 func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) (albumID string, notes []string, err error) {
 	root := m.index.Root()
+	cfg, err := policy.Ensure(root)
+	if err != nil {
+		return "", nil, err
+	}
+	pol, err := cfg.Policy("")
+	if err != nil {
+		return "", nil, err
+	}
+
 	albumArtist := release.Artist()
 	if albumArtist == "" {
 		albumArtist = firstNonEmpty(req.Artist, "Unknown Artist")
@@ -291,7 +304,12 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		notes = append(notes, fmt.Sprintf("release has no date, used file year %d", year))
 	}
 	albumTitle := release.Title
-	albumID = filepath.Join(safe.Name(albumArtist, "Unknown Artist"), fmt.Sprintf("%d - %s", year, safe.Name(albumTitle, "Unknown Album")))
+
+	dir, err := policy.PlanDir(pol, albumArtist, albumTitle, year)
+	if err != nil {
+		return "", nil, err
+	}
+	albumID = dir
 	target := filepath.Join(root, albumID)
 
 	if _, err := os.Stat(target); err == nil {
@@ -334,6 +352,16 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 	if release.ReleaseGroup != nil {
 		sc.MusicBrainz.ReleaseGroupID = release.ReleaseGroup.ID
 	}
+	sc.MusicBrainz.Date = release.Date
+	sc.Label = firstLabel(release)
+	sc.CatalogNumber = firstCatalogNumber(release)
+
+	renamed, err := applyTagsAndNames(stage, sc, pol)
+	if err != nil {
+		return "", nil, err
+	}
+	notes = append(notes, renamed...)
+
 	if err := sidecar.Save(stage, sc); err != nil {
 		return "", nil, err
 	}
@@ -348,6 +376,115 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		return "", nil, fmt.Errorf("rescan after import: %w", err)
 	}
 	return albumID, notes, nil
+}
+
+func firstLabel(release *mb.Release) string {
+	for _, info := range release.LabelInfo {
+		if info.Label != nil && info.Label.Name != "" {
+			return info.Label.Name
+		}
+	}
+	return ""
+}
+
+func firstCatalogNumber(release *mb.Release) string {
+	for _, info := range release.LabelInfo {
+		if info.CatalogNumber != "" {
+			return info.CatalogNumber
+		}
+	}
+	return ""
+}
+
+// applyTagsAndNames renames staged files to the policy template, writes the
+// policy payload into each file's tags, and records both in the sidecar.
+func applyTagsAndNames(stage string, sc *sidecar.Album, pol policy.Policy) ([]string, error) {
+	notes := []string{}
+	discTotal := 0
+	for _, track := range sc.Tracks {
+		if track.Disc > discTotal {
+			discTotal = track.Disc
+		}
+	}
+
+	used := map[string]bool{}
+	files := make([]string, 0, len(sc.Tracks))
+	payloads := make([]map[string][]string, 0, len(sc.Tracks))
+
+	for i := range sc.Tracks {
+		track := &sc.Tracks[i]
+		ext := filepath.Ext(track.File)
+		payload := payloadForTrack(sc, track, pol, len(sc.Tracks), discTotal)
+
+		planned, err := policy.PlanFilename(pol, track.Disc, track.Track, track.Title, ext, discTotal)
+		if err != nil {
+			return nil, fmt.Errorf("plan filename for %s: %w", track.File, err)
+		}
+		if used[planned] || planned == track.File {
+			planned = track.File
+		}
+		if used[planned] {
+			notes = append(notes, fmt.Sprintf("kept original name %s (planned name taken)", track.File))
+		} else if planned != track.File {
+			if err := os.Rename(filepath.Join(stage, track.File), filepath.Join(stage, planned)); err != nil {
+				return nil, fmt.Errorf("rename %s to %s: %w", track.File, planned, err)
+			}
+			track.File = planned
+		}
+		used[planned] = true
+
+		path := filepath.Join(stage, track.File)
+		if err := taglib.WriteTags(path, payload, taglib.Clear); err != nil {
+			return nil, fmt.Errorf("write tags %s: %w", path, err)
+		}
+		track.Tags = payload
+		files = append(files, track.File)
+		payloads = append(payloads, payload)
+	}
+
+	sc.TagState = &sidecar.TagState{
+		Policy:    pol.Name,
+		Applied:   time.Now().UTC(),
+		StateHash: policy.HashTracks(files, payloads),
+	}
+	return notes, nil
+}
+
+// payloadForTrack builds the full raw tag map for one track from the album
+// metadata, then runs it through the policy. The result is the exact payload
+// written into the file.
+func payloadForTrack(sc *sidecar.Album, track *sidecar.Track, pol policy.Policy, trackTotal, discTotal int) map[string][]string {
+	artist := []string{sc.AlbumArtist}
+	if len(track.Artists) > 0 {
+		artist = track.Artists
+	}
+	raw := map[string][]string{
+		"TITLE":       {track.Title},
+		"ARTIST":      artist,
+		"ALBUMARTIST": {sc.AlbumArtist},
+		"ALBUM":       {sc.Album},
+		"TRACKNUMBER": {fmt.Sprintf("%d/%d", track.Track, trackTotal)},
+		"DATE":        {firstNonEmpty(sc.MusicBrainz.Date, strconv.Itoa(sc.Year))},
+	}
+	if discTotal > 1 {
+		raw["DISCNUMBER"] = []string{fmt.Sprintf("%d/%d", track.Disc, discTotal)}
+	}
+	if sc.MusicBrainz.ReleaseID != "" {
+		raw["MUSICBRAINZ_ALBUMID"] = []string{sc.MusicBrainz.ReleaseID}
+	}
+	if sc.MusicBrainz.ReleaseGroupID != "" {
+		raw["MUSICBRAINZ_RELEASEGROUPID"] = []string{sc.MusicBrainz.ReleaseGroupID}
+	}
+	if track.RecordingID != "" {
+		raw["MUSICBRAINZ_TRACKID"] = []string{track.RecordingID}
+	}
+	if sc.Label != "" {
+		raw["LABEL"] = []string{sc.Label}
+	}
+	if sc.CatalogNumber != "" {
+		raw["CATALOGNUMBER"] = []string{sc.CatalogNumber}
+	}
+	return policy.Apply(pol, raw)
 }
 
 type stagedFile struct {
@@ -411,6 +548,8 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 				Track:         tracks[i].Position,
 				Disc:          mediumOf[i],
 				LengthSeconds: trackLength(tracks[i], file),
+				RecordingID:   tracks[i].ID,
+				Artists:       trackArtists(tracks[i], file),
 			})
 		}
 		return out, notes
@@ -453,6 +592,7 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 				Track:         file.tags.TrackNumber,
 				Disc:          file.tags.DiscNumber,
 				LengthSeconds: file.tags.LengthSeconds,
+				Artists:       trackArtistsFromTags(file),
 			})
 			continue
 		}
@@ -463,12 +603,171 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 			Track:         tracks[index].Position,
 			Disc:          mediumOf[index],
 			LengthSeconds: trackLength(tracks[index], file),
+			RecordingID:   tracks[index].ID,
+			Artists:       trackArtists(tracks[index], file),
 		})
 	}
 	if unmatched > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d tracks unmatched against the release, imported with file metadata", unmatched, len(ordered)))
 	}
 	return out, notes
+}
+
+// RetagResult reports one album's retag outcome.
+type RetagResult struct {
+	AlbumID string   `json:"album_id"`
+	Notes   []string `json:"notes,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
+// Retag brings one sidecar-backed album under a policy: renames files to the
+// template, rewrites tags to the payload, and records the new tag state.
+func (m *Manager) Retag(albumID, policyName string) RetagResult {
+	root := m.index.Root()
+	result := RetagResult{AlbumID: albumID}
+
+	cfg, err := policy.Ensure(root)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	pol, err := cfg.Policy(policyName)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	dir := filepath.Join(root, albumID)
+	sc, err := sidecar.Load(dir)
+	if err != nil {
+		result.Error = fmt.Sprintf("load sidecar: %v", err)
+		return result
+	}
+
+	stage := filepath.Join(root, ".staging", fmt.Sprintf("retag-%d-%s", time.Now().UnixNano(), safe.Name(sc.Album, "album")))
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		result.Error = fmt.Sprintf("create staging dir: %v", err)
+		return result
+	}
+	defer os.RemoveAll(stage)
+
+	for _, track := range sc.Tracks {
+		if err := copyFile(filepath.Join(dir, track.File), filepath.Join(stage, track.File)); err != nil {
+			result.Error = err.Error()
+			return result
+		}
+	}
+	for _, entry := range []string{"cover.jpg", "cover.png"} {
+		if _, err := os.Stat(filepath.Join(dir, entry)); err == nil {
+			if err := copyFile(filepath.Join(dir, entry), filepath.Join(stage, entry)); err != nil {
+				result.Error = err.Error()
+				return result
+			}
+		}
+	}
+
+	discTotal := 0
+	for _, track := range sc.Tracks {
+		if track.Disc > discTotal {
+			discTotal = track.Disc
+		}
+	}
+
+	notes := []string{}
+	used := map[string]bool{}
+	files := make([]string, 0, len(sc.Tracks))
+	payloads := make([]map[string][]string, 0, len(sc.Tracks))
+	for i := range sc.Tracks {
+		track := &sc.Tracks[i]
+		payload := track.Tags
+		if payload == nil {
+			payload = payloadForTrack(sc, track, pol, len(sc.Tracks), discTotal)
+			notes = append(notes, fmt.Sprintf("rebuilt payload for %s from sidecar fields", track.File))
+		}
+
+		planned, err := policy.PlanFilename(pol, track.Disc, track.Track, track.Title, filepath.Ext(track.File), discTotal)
+		if err != nil {
+			result.Error = fmt.Sprintf("plan filename for %s: %v", track.File, err)
+			return result
+		}
+		if used[planned] || planned == track.File {
+			planned = track.File
+		}
+		if used[planned] {
+			notes = append(notes, fmt.Sprintf("kept original name %s (planned name taken)", track.File))
+		} else if planned != track.File {
+			if err := os.Rename(filepath.Join(stage, track.File), filepath.Join(stage, planned)); err != nil {
+				result.Error = fmt.Sprintf("rename %s: %v", track.File, err)
+				return result
+			}
+			track.File = planned
+		}
+		used[planned] = true
+
+		path := filepath.Join(stage, track.File)
+		if err := taglib.WriteTags(path, payload, taglib.Clear); err != nil {
+			result.Error = fmt.Sprintf("write tags %s: %v", track.File, err)
+			return result
+		}
+		track.Tags = payload
+		files = append(files, track.File)
+		payloads = append(payloads, payload)
+	}
+
+	sc.TagState = &sidecar.TagState{
+		Policy:    pol.Name,
+		Applied:   time.Now().UTC(),
+		StateHash: policy.HashTracks(files, payloads),
+	}
+	if err := sidecar.Save(stage, sc); err != nil {
+		result.Error = fmt.Sprintf("save sidecar: %v", err)
+		return result
+	}
+
+	if err := trash(root, dir); err != nil {
+		result.Error = fmt.Sprintf("trash old album: %v", err)
+		return result
+	}
+	if err := os.Rename(stage, dir); err != nil {
+		result.Error = fmt.Sprintf("publish %s: %v", dir, err)
+		return result
+	}
+	if err := m.index.Scan(); err != nil {
+		result.Error = fmt.Sprintf("rescan: %v", err)
+		return result
+	}
+	result.Notes = notes
+	return result
+}
+
+// RetagAll retags every sidecar-backed album and skips pending ones.
+func (m *Manager) RetagAll(policyName string) []RetagResult {
+	results := []RetagResult{}
+	for _, album := range m.index.Albums(library.Query{}) {
+		if album.Pending {
+			results = append(results, RetagResult{AlbumID: album.ID, Error: "pending import, skipped"})
+			continue
+		}
+		results = append(results, m.Retag(album.ID, policyName))
+	}
+	return results
+}
+
+func trackArtists(track mb.ReleaseTrack, file stagedFile) []string {
+	if credit := mb.CreditName(track.ArtistCredit); credit != "" {
+		return []string{credit}
+	}
+	return trackArtistsFromTags(file)
+}
+
+func trackArtistsFromTags(file stagedFile) []string {
+	if len(file.tags.Artists) > 0 {
+		return file.tags.Artists
+	}
+	if len(file.tags.AlbumArtists) > 0 {
+		return file.tags.AlbumArtists
+	}
+	return nil
 }
 
 func mediumPositions(release *mb.Release) []int {

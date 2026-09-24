@@ -45,6 +45,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /import", s.importStart)
 	mux.HandleFunc("POST /import/decide", s.importDecide)
 	mux.HandleFunc("GET /decisions", s.decisions)
+	mux.HandleFunc("POST /retag", s.retag)
 	return mux
 }
 
@@ -160,6 +161,38 @@ func (s *Server) decisions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Decisions []importer.Decision `json:"decisions"`
 	}{s.Import.Decisions()})
+}
+
+func (s *Server) retag(w http.ResponseWriter, r *http.Request) {
+	if s.Import == nil {
+		writeError(w, http.StatusServiceUnavailable, "import is not configured on this daemon")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req struct {
+		Album  string `json:"album"`
+		All    bool   `json:"all"`
+		Policy string `json:"policy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "decode request body: "+err.Error())
+		return
+	}
+	if !req.All && req.Album == "" {
+		writeError(w, http.StatusBadRequest, "album or all is required")
+		return
+	}
+
+	if req.All {
+		writeJSON(w, http.StatusOK, struct {
+			Results []importer.RetagResult `json:"results"`
+		}{s.Import.RetagAll(req.Policy)})
+		return
+	}
+	result := s.Import.Retag(req.Album, req.Policy)
+	writeJSON(w, http.StatusOK, struct {
+		Results []importer.RetagResult `json:"results"`
+	}{[]importer.RetagResult{result}})
 }
 
 func writeImportError(w http.ResponseWriter, err error) {

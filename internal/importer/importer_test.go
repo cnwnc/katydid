@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"doppel.moe/katydid/internal/mb/mbtest"
 	"doppel.moe/katydid/internal/sidecar"
 	"doppel.moe/katydid/internal/testaudio"
+	"go.senan.xyz/taglib"
 )
 
 func searchBody(releases ...mb.SearchRelease) string {
@@ -345,3 +347,202 @@ func TestImportMissingDir(t *testing.T) {
 		t.Errorf("import missing dir: got nil error, want failure")
 	}
 }
+
+func TestImportAppliesPolicy(t *testing.T) {
+startMB(t, autoFixture())
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src, By: "test"})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: %q", result.Status)
+	}
+
+	albumDir := filepath.Join(root, result.AlbumID)
+	entries, err := os.ReadDir(albumDir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	names := []string{}
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	if len(names) != 3 || names[0] != "01 - First Song.flac" || names[1] != "02 - Second Song.flac" || names[2] != "album.yaml" {
+		t.Errorf("album dir contents after policy rename: %v", names)
+	}
+
+	raw, err := taglib.ReadTags(filepath.Join(albumDir, "01 - First Song.flac"))
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if got := raw["TITLE"]; len(got) != 1 || got[0] != "First Song" {
+		t.Errorf("written title: %v", got)
+	}
+	if got := raw["ARTIST"]; len(got) != 1 || got[0] != "Test Artist" {
+		t.Errorf("written artist: %v", got)
+	}
+	if got := raw["TRACKNUMBER"]; len(got) != 1 || got[0] != "1/2" {
+		t.Errorf("written tracknumber: %v", got)
+	}
+	if got := raw["MUSICBRAINZ_ALBUMID"]; len(got) != 1 || got[0] != "rel-1" {
+		t.Errorf("written mb album id: %v", got)
+	}
+	if got := raw["DATE"]; len(got) != 1 || got[0] != "2001-10-01" {
+		t.Errorf("written date: %v", got)
+	}
+
+	sc, err := sidecar.Load(albumDir)
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if sc.TagState == nil || sc.TagState.Policy != "default" || !strings.HasPrefix(sc.TagState.StateHash, "sha256:") {
+		t.Fatalf("tag state: %+v", sc.TagState)
+	}
+	if sc.Tracks[0].Tags == nil || len(sc.Tracks[0].Tags["TITLE"]) != 1 {
+		t.Errorf("sidecar payload missing: %+v", sc.Tracks[0])
+	}
+	if _, err := manager.index.Album(result.AlbumID); err != nil {
+		t.Errorf("album not in index: %v", err)
+	}
+}
+
+func TestImportScrubbsUnmanagedTags(t *testing.T) {
+startMB(t, autoFixture())
+	src := twoTestFiles(t)
+	first := filepath.Join(src, "01 - First Song.flac")
+	if err := taglib.WriteTags(first, map[string][]string{"COMMENT": {"ripped by someone"}}, 0); err != nil {
+		t.Fatalf("inject comment: %v", err)
+	}
+	manager := newManager(t, t.TempDir())
+
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	raw, err := taglib.ReadTags(filepath.Join(libRoot(manager), result.AlbumID, "01 - First Song.flac"))
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if got, ok := raw["COMMENT"]; ok {
+		t.Errorf("comment survived import: %v", got)
+	}
+}
+
+func TestCheckDetectsDriftAfterExternalEdit(t *testing.T) {
+startMB(t, autoFixture())
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if findings := manager.index.Check(); len(findings) != 0 {
+		t.Fatalf("fresh import has findings: %+v", findings)
+	}
+
+	edited := filepath.Join(libRoot(manager), result.AlbumID, "01 - First Song.flac")
+	if err := taglib.WriteTags(edited, map[string][]string{"TITLE": {"Edited By Hand"}}, 0); err != nil {
+		t.Fatalf("edit tags: %v", err)
+	}
+	if err := manager.index.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	drifted := false
+	for _, finding := range manager.index.Check() {
+		if finding.Kind == library.KindTagDrift && strings.Contains(finding.Detail, "TITLE") {
+			drifted = true
+		}
+	}
+	if !drifted {
+		t.Errorf("expected tag drift after external edit: %+v", manager.index.Check())
+	}
+}
+
+func TestRetagRestoresPolicyAndNames(t *testing.T) {
+startMB(t, autoFixture())
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	albumID := result.AlbumID
+
+	edited := filepath.Join(libRoot(manager), albumID, "01 - First Song.flac")
+	if err := taglib.WriteTags(edited, map[string][]string{"TITLE": {"Edited By Hand"}}, 0); err != nil {
+		t.Fatalf("edit tags: %v", err)
+	}
+
+	retag := manager.Retag(albumID, "")
+	if retag.Error != "" {
+		t.Fatalf("retag: %s", retag.Error)
+	}
+
+	raw, err := taglib.ReadTags(filepath.Join(libRoot(manager), albumID, "01 - First Song.flac"))
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if got := raw["TITLE"]; len(got) != 1 || got[0] != "First Song" {
+		t.Errorf("title after retag: %v", got)
+	}
+	if findings := manager.index.Check(); len(findings) != 0 {
+		t.Errorf("findings after retag: %+v", findings)
+	}
+
+	sc, err := sidecar.Load(filepath.Join(libRoot(manager), albumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if sc.TagState == nil || sc.Tracks[0].Tags == nil {
+		t.Errorf("retag did not record tag state: %+v", sc.TagState)
+	}
+}
+
+func TestRetagAllSkipsPending(t *testing.T) {
+startMB(t, autoFixture())
+	manager := newManager(t, t.TempDir())
+
+	// a pending album: audio files without sidecar, never imported
+	pendingDir := filepath.Join(manager.index.Root(), "Some Artist", "2020 - Some Album")
+	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	testaudio.MakeTracked(t, pendingDir, "01 - Pending Song.flac", "Pending Song", "Some Artist", "Some Album", 1, 1, 2020)
+	if err := manager.index.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	src2 := twoTestFiles(t)
+	if _, err := manager.Import(context.Background(), Request{Dir: src2}); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	results := manager.RetagAll("")
+	if len(results) != 2 {
+		t.Fatalf("results: %+v", results)
+	}
+	byID := map[string]RetagResult{}
+	for _, r := range results {
+		byID[r.AlbumID] = r
+	}
+	pending, ok := byID[filepath.Join("Some Artist", "2020 - Some Album")]
+	if !ok || pending.Error == "" {
+		t.Errorf("pending album should be skipped with error: %+v", results)
+	}
+	for _, r := range results {
+		if r.Error == "" && r.AlbumID != filepath.Join("Some Artist", "2020 - Some Album") {
+			if r.AlbumID == "" {
+				t.Errorf("empty album id in results: %+v", results)
+			}
+		}
+	}
+}
+
+func libRoot(m *Manager) string { return m.index.Root() }

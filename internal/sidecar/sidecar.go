@@ -17,16 +17,20 @@ const FileName = "album.yaml"
 var ErrNoSidecar = errors.New("no sidecar")
 
 type Track struct {
-	File          string  `yaml:"file"`
-	Title         string  `yaml:"title"`
-	Track         int     `yaml:"track"`
-	Disc          int     `yaml:"disc,omitempty"`
-	LengthSeconds float64 `yaml:"length_seconds,omitempty"`
+	File          string              `yaml:"file"`
+	Title         string              `yaml:"title"`
+	Track         int                 `yaml:"track"`
+	Disc          int                 `yaml:"disc,omitempty"`
+	LengthSeconds float64             `yaml:"length_seconds,omitempty"`
+	RecordingID   string              `yaml:"recording_id,omitempty"`
+	Artists       []string            `yaml:"artists,omitempty"`
+	Tags          map[string][]string `yaml:"tags,omitempty"`
 }
 
 type MusicBrainz struct {
 	ReleaseGroupID string `yaml:"releasegroup,omitempty"`
 	ReleaseID      string `yaml:"release,omitempty"`
+	Date           string `yaml:"date,omitempty"`
 }
 
 type Origin struct {
@@ -47,14 +51,16 @@ type TagState struct {
 }
 
 type Album struct {
-	Schema      int         `yaml:"schema"`
-	Album       string      `yaml:"album"`
-	AlbumArtist string      `yaml:"albumartist"`
-	Year        int         `yaml:"year,omitempty"`
-	MusicBrainz MusicBrainz `yaml:"musicbrainz"`
-	Provenance  Provenance  `yaml:"provenance"`
-	TagState    *TagState   `yaml:"tags,omitempty"`
-	Tracks      []Track     `yaml:"tracks"`
+	Schema        int         `yaml:"schema"`
+	Album         string      `yaml:"album"`
+	AlbumArtist   string      `yaml:"albumartist"`
+	Year          int         `yaml:"year,omitempty"`
+	Label         string      `yaml:"label,omitempty"`
+	CatalogNumber string      `yaml:"catalognumber,omitempty"`
+	MusicBrainz   MusicBrainz `yaml:"musicbrainz"`
+	Provenance    Provenance  `yaml:"provenance"`
+	TagState      *TagState   `yaml:"tags,omitempty"`
+	Tracks        []Track     `yaml:"tracks"`
 }
 
 func Load(dir string) (*Album, error) {

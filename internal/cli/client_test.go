@@ -36,6 +36,7 @@ func startDaemon(t *testing.T) (*cli.Client, library.Status) {
 		AlbumArtist: "Gaza",
 		Year:        2012,
 		Provenance:  sidecar.Provenance{Imported: time.Now(), By: "test"},
+		TagState:    &sidecar.TagState{Policy: "default", Applied: time.Now(), StateHash: "sha256:fixture"},
 		Tracks: []sidecar.Track{
 			{File: "01 - Mostly Hair and Bones Now.flac", Title: "Mostly Hair and Bones Now", Track: 1, LengthSeconds: 155},
 			{File: "02 - This We Celebrate.flac", Title: "This We Celebrate", Track: 2, LengthSeconds: 201},

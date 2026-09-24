@@ -3,10 +3,12 @@ package library
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"doppel.moe/katydid/internal/sidecar"
+	"doppel.moe/katydid/internal/testaudio"
 )
 
 const scratchRoot = "/srv/git/katydid/scratch/original"
@@ -29,10 +31,9 @@ func writeLibrary(t *testing.T) string {
 		t.Fatalf("mkdir: %v", err)
 	}
 	for _, file := range []string{"01 - Mostly Hair and Bones Now.flac", "02 - This We Celebrate.flac"} {
-		if err := os.WriteFile(filepath.Join(gaza, file), []byte("not audio"), 0o644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
+		testaudio.MakeTracked(t, gaza, file, strings.TrimSuffix(strings.TrimPrefix(file, "01 - "), ".flac"), "Gaza", "No Absolutes in Human Suffering", 1, 1, 2012)
 	}
+	testaudio.MakeTracked(t, gaza, "02 - This We Celebrate.flac", "This We Celebrate", "Gaza", "No Absolutes in Human Suffering", 2, 1, 2012)
 
 	drukqs := filepath.Join(root, "Aphex Twin", "2001 - Drukqs")
 	if err := os.MkdirAll(drukqs, 0o755); err != nil {
@@ -49,6 +50,7 @@ func writeLibrary(t *testing.T) string {
 		AlbumArtist: "Gaza",
 		Year:        2012,
 		Provenance:  sidecar.Provenance{Imported: time.Now(), By: "test"},
+		TagState:    &sidecar.TagState{Policy: "default", Applied: time.Now(), StateHash: "sha256:fixture"},
 		Tracks: []sidecar.Track{
 			{File: "01 - Mostly Hair and Bones Now.flac", Title: "Mostly Hair and Bones Now", Track: 1, LengthSeconds: 155},
 			{File: "02 - This We Celebrate.flac", Title: "This We Celebrate", Track: 2, LengthSeconds: 201},
@@ -229,5 +231,46 @@ func TestScanScratchIntegration(t *testing.T) {
 	}
 	if kikuo.Meta.Tracks[0].Title != "学校に行った日のこと" {
 		t.Errorf("kikuo first track title from cjk tags: %q", kikuo.Meta.Tracks[0].Title)
+	}
+}
+
+func TestCheckTagDrift(t *testing.T) {
+	root := writeLibrary(t)
+	ix := NewIndex(root)
+	if err := ix.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	findings := ix.Check()
+	for _, f := range findings {
+		if f.Kind == KindTagDrift {
+			t.Fatalf("healthy fixture flagged as drift: %+v", findings)
+		}
+	}
+
+	gazaID := filepath.Join("Gaza", "2012 - No Absolutes in Human Suffering")
+	sc, err := sidecar.Load(filepath.Join(root, gazaID))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	sc.Tracks[0].Tags = map[string][]string{
+		"TITLE":  {"Edited By Someone Else"},
+		"ARTIST": {"Gaza"},
+	}
+	if err := sidecar.Save(filepath.Join(root, gazaID), sc); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := ix.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	drifted := false
+	for _, f := range ix.Check() {
+		if f.Kind == KindTagDrift && f.Album == gazaID && f.File == sc.Tracks[0].File && strings.Contains(f.Detail, "TITLE") {
+			drifted = true
+		}
+	}
+	if !drifted {
+		t.Errorf("expected tag_drift for edited title, got %+v", ix.Check())
 	}
 }

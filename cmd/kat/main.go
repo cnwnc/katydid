@@ -26,6 +26,7 @@ usage:
   kat import <dir> [--artist=] [--album=] [--year=] [--pick=N] [--skip] [--replace]
               [--by=] [--request="..."]
   kat decide <token> <N|skip>
+  kat retag [--all | <album-id>] [--policy=]
 
 environment:
   KATYDID_SOCKET  unix socket path (default /tmp/katyd.sock)`
@@ -53,6 +54,8 @@ func main() {
 		err = runImport(client, os.Args[2:])
 	case "decide":
 		err = runDecide(client, os.Args[2:])
+	case "retag":
+		err = runRetag(client, os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 	default:
@@ -302,6 +305,42 @@ func runDecide(client *cli.Client, args []string) error {
 		return fmt.Errorf("pick %q is not a number or skip", args[1])
 	}
 	return decideAndReport(client, token, chosen, false)
+}
+
+func runRetag(client *cli.Client, args []string) error {
+	flags := flag.NewFlagSet("retag", flag.ExitOnError)
+	all := flags.Bool("all", false, "retag every sidecar-backed album")
+	policyName := flags.String("policy", "", "policy name (default: library default)")
+	positional, rest := splitFlags(args, map[string]bool{"all": true})
+	if err := flags.Parse(rest); err != nil {
+		return err
+	}
+	if !*all && len(positional) != 1 {
+		return errors.New("usage: kat retag [--all | <album-id>] [--policy=]")
+	}
+	if *all && len(positional) > 0 {
+		return errors.New("usage: kat retag takes an album id or --all, not both")
+	}
+
+	album := ""
+	if len(positional) == 1 {
+		album = positional[0]
+	}
+	response, err := client.Retag(album, *all, *policyName)
+	if err != nil {
+		return err
+	}
+	for _, result := range response.Results {
+		if result.Error != "" {
+			fmt.Printf("%s: error: %s\n", result.AlbumID, result.Error)
+			continue
+		}
+		fmt.Printf("%s: retagged\n", result.AlbumID)
+		for _, note := range result.Notes {
+			fmt.Printf("  note: %s\n", note)
+		}
+	}
+	return nil
 }
 
 func splitFlags(args []string, boolean map[string]bool) (positional, flagArgs []string) {

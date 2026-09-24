@@ -83,6 +83,20 @@ func (c *Client) Decide(token string, pick int, skip bool) (importer.Result, err
 	return out, c.postJSON("/import/decide", body, &out)
 }
 
+type RetagResponse struct {
+	Results []importer.RetagResult `json:"results"`
+}
+
+func (c *Client) Retag(album string, all bool, policyName string) (RetagResponse, error) {
+	body := struct {
+		Album  string `json:"album,omitempty"`
+		All    bool   `json:"all,omitempty"`
+		Policy string `json:"policy,omitempty"`
+	}{Album: album, All: all, Policy: policyName}
+	var out RetagResponse
+	return out, c.postJSON("/retag", body, &out)
+}
+
 func (c *Client) get(path string, out any) error {
 	return c.do(http.MethodGet, path, out)
 }

@@ -283,3 +283,8 @@ func (c *Client) cachePath(requestURL string) string {
 	sum := sha256.Sum256([]byte(requestURL))
 	return filepath.Join(c.cacheDir, hex.EncodeToString(sum[:])+".json")
 }
+
+// CreditName renders an artist-credit as a display string.
+func CreditName(credits []ArtistCredit) string {
+	return creditName(credits)
+}
