@@ -103,9 +103,21 @@ func Rank(ev Evidence, releases []mb.SearchRelease) []Candidate {
 	return all
 }
 
-// RankPrefers, in order: the oldest release (dateless last), then media
-// format Digital > CD > Vinyl > Tape > Other, then musicbrainz score.
+// scoreTieWindow treats scores within this range as tied so date and
+// format can break ties between editions of the same release; distinct
+// works differ by far more than one component weight.
+const scoreTieWindow = 0.05
+
+// betterCandidate ranks score first; ties (same name/artist editions)
+// prefer the oldest dated release, then format Digital > CD > Vinyl >
+// Tape > Other, then the musicbrainz search score, then the id.
 func betterCandidate(a, b Candidate) bool {
+	if a.Score != b.Score {
+		delta := a.Score - b.Score
+		if delta > scoreTieWindow || delta < -scoreTieWindow {
+			return delta > 0
+		}
+	}
 	if (a.Date == "") != (b.Date == "") {
 		return a.Date != ""
 	}
@@ -116,8 +128,8 @@ func betterCandidate(a, b Candidate) bool {
 	if pa != pb {
 		return pa < pb
 	}
-	if a.Score != b.Score {
-		return a.Score > b.Score
+	if a.MBSearchScore != b.MBSearchScore {
+		return a.MBSearchScore > b.MBSearchScore
 	}
 	return a.ReleaseID < b.ReleaseID
 }

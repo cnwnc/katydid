@@ -219,7 +219,13 @@ func TestRankPrefersOldestDate(t *testing.T) {
 		syntheticWithMedia("original", "O", "Album", "Artist", "1998", 10, "CD"),
 		syntheticWithMedia("dateless", "D", "Album", "Artist", "", 10, "Digital Media"),
 	}
-	ranked := Rank(Evidence{Artist: "Artist", Album: "Album", TrackCount: 10}, releases)
+	ev := Evidence{Artist: "Artist", Album: "Album", TrackCount: 10}
+	for _, release := range releases {
+		if c := scoreCandidate(ev, release); c.Score < scoreTieWindow*2 {
+			t.Fatalf("test setup: scores must be near-equal for the date tiebreak to apply, got %f", c.Score)
+		}
+	}
+	ranked := Rank(ev, releases)
 	if ranked[0].ReleaseID != "original" || ranked[1].ReleaseID != "remaster" || ranked[2].ReleaseID != "dateless" {
 		t.Fatalf("order: %s, %s, %s", ranked[0].ReleaseID, ranked[1].ReleaseID, ranked[2].ReleaseID)
 	}
