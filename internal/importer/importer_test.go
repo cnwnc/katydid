@@ -838,3 +838,68 @@ func TestImportRemapPairsMismatchedFiles(t *testing.T) {
 		t.Errorf("remapped track: %+v", sc.Tracks[0])
 	}
 }
+
+func TestDecideRemapStealsTrack(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-2", "rg-2", "An Awesome Wave", "alt-J", "2012-05-25", 2)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-2", "rg-2", "An Awesome Wave", "alt-J", "2012-05-25",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "Intro"), mbtest.Track(2, "Bloodflood"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := t.TempDir()
+	testaudio.MakeTracked(t, src, "01 Intro.flac", "Intro", "alt-J", "An Awesome Wave", 1, 1, 2012)
+	testaudio.MakeTracked(t, src, "01 Intro.1.flac", "Intro", "alt-J", "An Awesome Wave", 1, 1, 2012)
+	testaudio.MakeTracked(t, src, "02 Bloodflood.flac", "Bloodflood", "alt-J", "An Awesome Wave", 2, 1, 2012)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	token := result.Decision.Token
+	ctx := context.Background()
+
+	if _, err := manager.Decide(ctx, token, DecideInput{Pick: 1}); err != nil {
+		t.Fatalf("pick: %v", err)
+	}
+	if _, err := manager.Decide(ctx, token, DecideInput{RemapFile: 1, RemapTrack: 1}); err != nil {
+		t.Fatalf("first assign: %v", err)
+	}
+	// file 1 already claimed track 1; file 2 must supersede it, not error
+	second, err := manager.Decide(ctx, token, DecideInput{RemapFile: 2, RemapTrack: 1})
+	if err != nil {
+		t.Fatalf("superseding assign should replace the earlier claim: %v", err)
+	}
+	if got := second.Decision.Remap.Map[2]; got != 1 {
+		t.Errorf("file 2 should own track 1: %+v", second.Decision.Remap.Map)
+	}
+	if _, paired := second.Decision.Remap.Map[1]; paired {
+		t.Errorf("file 1 should be unpaired after supersede: %+v", second.Decision.Remap.Map)
+	}
+	accepted, err := manager.Decide(ctx, token, DecideInput{Accept: true})
+	if err != nil || accepted.Status != statusImported {
+		t.Fatalf("accept after supersede: %+v err %v", accepted, err)
+	}
+	sc, err := sidecar.Load(filepath.Join(root, accepted.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 2 || sc.Tracks[0].Title != "Intro" {
+		t.Fatalf("tracks: %+v", sc.Tracks)
+	}
+	// file 2 is Intro.flac per the table order, so supersede keeps
+	// Intro.flac and drops the Intro.1 duplicate
+	dropped := false
+	for _, note := range accepted.Notes {
+		if strings.Contains(note, "left out 1 file(s) not part of the release: 01 Intro.1.flac") {
+			dropped = true
+		}
+	}
+	if !dropped {
+		t.Errorf("drop note should name Intro.1.flac: %+v", accepted.Notes)
+	}
+}

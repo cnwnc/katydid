@@ -28,6 +28,7 @@ usage:
               [-by=] [-request="..."]
   kat decide <token> <N|Y|done|skip>, or <token> remap <file> <track>
   kat retag [-all | <album-id>] [-policy=]
+  kat decisions
 
 environment:
   KATYDID_SOCKET  unix socket path (default /run/katyd/katyd.sock)`
@@ -57,8 +58,8 @@ func main() {
 		err = runDecide(client, os.Args[2:])
 	case "retag":
 		err = runRetag(client, os.Args[2:])
-	case "help", "-h", "--help":
-		fmt.Println(usage)
+	case "decisions":
+		err = runDecisions(client, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "kat: unknown command %q\n\n%s\n", os.Args[1], usage)
 		os.Exit(2)
@@ -279,6 +280,7 @@ func handleImportResult(client *cli.Client, result importer.Result, pick int, sk
 		fmt.Printf("note: %s\n", note)
 	}
 	fmt.Printf("low confidence for %s - %s (%d files, %d)\n", ev.Artist, ev.Album, ev.TrackCount, ev.Year)
+	fmt.Printf("decision: %s\n", decision.Token)
 	fmt.Println("candidates:")
 	for _, candidate := range decision.Candidates {
 		parts := []string{}
@@ -555,4 +557,24 @@ func splitFlags(args []string, boolean map[string]bool) (positional, flagArgs []
 		}
 	}
 	return positional, flagArgs
+}
+
+func runDecisions(client *cli.Client, args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: kat decisions")
+	}
+	decisions, err := client.Decisions()
+	if err != nil {
+		return err
+	}
+	if len(decisions) == 0 {
+		fmt.Println("no pending decisions")
+		return nil
+	}
+	for _, decision := range decisions {
+		fmt.Printf("%s  %s - %s (%d files, %d candidates)\n",
+			decision.Token, decision.Evidence.Artist, decision.Evidence.Album,
+			decision.Evidence.TrackCount, len(decision.Candidates))
+	}
+	return nil
 }

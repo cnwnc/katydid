@@ -240,6 +240,12 @@ func (m *Manager) Decide(ctx context.Context, token string, in DecideInput) (*Re
 		if p.overrides == nil {
 			p.overrides = map[int]int{}
 		}
+		// a track belongs to one file: the newest claim supersedes
+		for other, otherTrack := range p.overrides {
+			if otherTrack == in.RemapTrack {
+				delete(p.overrides, other)
+			}
+		}
 		p.overrides[in.RemapFile] = in.RemapTrack
 	}
 

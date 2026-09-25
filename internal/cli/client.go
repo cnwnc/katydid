@@ -160,3 +160,10 @@ func (c *Client) Resolve(artist, album string, year int, mbid string) (api.Resol
 	var out api.ResolveResponse
 	return out, c.get("/resolve?"+strings.Join(params, "&"), &out)
 }
+
+func (c *Client) Decisions() ([]importer.Decision, error) {
+	var out struct {
+		Decisions []importer.Decision `json:"decisions"`
+	}
+	return out.Decisions, c.get("/decisions", &out)
+}
