@@ -345,6 +345,9 @@ func decideInteractive(client *cli.Client, result importer.Result) error {
 			if err != nil {
 				return err
 			}
+			if result.Status == "imported" || result.Status == "skipped" {
+				return reportResult(result)
+			}
 			printDecisionState(result)
 			continue
 		}
@@ -363,6 +366,9 @@ func decideInteractive(client *cli.Client, result importer.Result) error {
 		}
 		if err != nil {
 			return err
+		}
+		if result.Status == "imported" || result.Status == "skipped" {
+			return reportResult(result)
 		}
 		printDecisionState(result)
 	}
