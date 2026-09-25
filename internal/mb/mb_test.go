@@ -174,3 +174,75 @@ func TestHTTPErrorFailsLoud(t *testing.T) {
 		t.Fatalf("search against 503: got nil error, want failure")
 	}
 }
+
+func TestRetryRecoversFrom503(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("overloaded"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"releases": []}`))
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(server.URL, "")
+
+	releases, err := client.SearchReleases(context.Background(), "artist:\"x\"")
+	if err != nil {
+		t.Fatalf("search after 503s: %v", err)
+	}
+	if len(releases) != 0 {
+		t.Errorf("releases: %+v", releases)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (two 503s then success)", calls)
+	}
+}
+
+func TestRetryGivesUpAfterMax(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(server.URL, "")
+	client.SetMaxRetries(2)
+
+	_, err := client.SearchReleases(context.Background(), "artist:\"x\"")
+	if err == nil {
+		t.Fatalf("persistent 502: got nil error, want failure")
+	}
+	if want := 3; calls != want {
+		t.Errorf("calls = %d, want %d (first attempt plus retries)", calls, want)
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("error should mention the status: %v", err)
+	}
+}
+
+func TestRetryHonorsRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(server.URL, "")
+	client.SetMaxRetries(1)
+
+	start := time.Now()
+	_, err := client.SearchReleases(context.Background(), "artist:\"x\"")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("persistent 503: got nil error, want failure")
+	}
+	// The computed backoff (5ms) is smaller than Retry-After (1s), so the
+	// wait must stretch to at least the Retry-After floor.
+	if elapsed < time.Second {
+		t.Errorf("elapsed %v < 1s; Retry-After was not honored", elapsed)
+	}
+}
+

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ const (
 	requestInterval = 1100 * time.Millisecond
 	maxBodyBytes    = 10 << 20
 	userAgent       = "katydid/0.1.0 ( https://doppel.moe )"
+	maxRetries      = 4
+	maxBackoff      = 10 * time.Second
 )
 
 type Client struct {
@@ -31,6 +34,7 @@ type Client struct {
 	cacheDir string
 	noCache  bool
 	interval time.Duration
+	retries  int
 
 	mu          sync.Mutex
 	lastRequest time.Time
@@ -47,6 +51,7 @@ func New(base, cacheDir string, noCache bool) *Client {
 		cacheDir: cacheDir,
 		noCache:  noCache,
 		interval: requestInterval,
+		retries:  maxRetries,
 	}
 }
 
@@ -263,6 +268,10 @@ func (c *Client) SetRequestInterval(d time.Duration) {
 	c.interval = d
 }
 
+func (c *Client) SetMaxRetries(n int) {
+	c.retries = n
+}
+
 func (c *Client) SearchReleases(ctx context.Context, query string) ([]SearchRelease, error) {
 	path := "/ws/2/release?query=" + url.QueryEscape(query) + "&fmt=json&limit=25"
 	var out struct {
@@ -302,7 +311,59 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// statusError marks a response status; 5XX is transient and retried.
+type statusError struct {
+	status     int
+	statusText string
+	retryAfter time.Duration
+	requestURL string
+	snippet    string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("get %s: status %s: %s", e.requestURL, e.statusText, e.snippet)
+}
+
+func retryAfter(header http.Header) time.Duration {
+	raw := header.Get("Retry-After")
+	if raw == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// fetch retries transient failures (5XX, dropped connections) with
+// exponential backoff derived from the request interval; musicbrainz
+// throws occasional 503s under load and a bare failure would skip the
+// album. Retry-After is honored when larger than the computed backoff.
 func (c *Client) fetch(ctx context.Context, requestURL string) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		body, err := c.attempt(ctx, requestURL)
+		if err == nil {
+			return body, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		var status *statusError
+		transient := !errors.As(err, &status) || status.status >= 500
+		if !transient || attempt >= c.retries {
+			return nil, err
+		}
+		wait := c.backoff(attempt, status)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (c *Client) attempt(ctx context.Context, requestURL string) ([]byte, error) {
 	c.throttle()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
@@ -327,9 +388,29 @@ func (c *Client) fetch(ctx context.Context, requestURL string) ([]byte, error) {
 		if len(snippet) > 120 {
 			snippet = snippet[:120]
 		}
-		return nil, fmt.Errorf("get %s: status %s: %s", requestURL, resp.Status, snippet)
+		return nil, &statusError{
+			status:     resp.StatusCode,
+			statusText: resp.Status,
+			retryAfter: retryAfter(resp.Header),
+			requestURL: requestURL,
+			snippet:    snippet,
+		}
 	}
 	return body, nil
+}
+
+func (c *Client) backoff(attempt int, status *statusError) time.Duration {
+	wait := c.interval << attempt
+	if wait > maxBackoff {
+		wait = maxBackoff
+	}
+	if status != nil && status.retryAfter > wait {
+		wait = status.retryAfter
+	}
+	if wait > maxBackoff {
+		wait = maxBackoff
+	}
+	return wait
 }
 
 func (c *Client) throttle() {
