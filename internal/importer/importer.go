@@ -40,6 +40,7 @@ type Request struct {
 	Artist  string `json:"artist,omitempty"`
 	Album   string `json:"album,omitempty"`
 	Year    int    `json:"year,omitempty"`
+	MBID    string `json:"mbid,omitempty"`
 	Replace bool   `json:"replace,omitempty"`
 	By      string `json:"by,omitempty"`
 	Request string `json:"request,omitempty"`
@@ -98,6 +99,10 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 
+	if req.MBID != "" {
+		return m.importByMBID(ctx, req, files, evidence)
+	}
+
 	releases, err := m.mb.SearchReleases(ctx, mb.BuildQuery(evidence.Artist, evidence.Album))
 	if err != nil {
 		return nil, err
@@ -138,6 +143,23 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 		Evidence:   evidence,
 		Candidates: top,
 	}}, nil
+}
+
+func (m *Manager) importByMBID(ctx context.Context, req Request, files []sourceFile, evidence match.Evidence) (*Result, error) {
+	release, err := m.mb.LookupRelease(ctx, req.MBID)
+	if err != nil {
+		return nil, fmt.Errorf("musicbrainz override %s: %w", req.MBID, err)
+	}
+	coverage := match.Coverage(evidence.TrackTitles, release)
+	albumID, notes, err := m.publish(req, release, files)
+	if err != nil {
+		return nil, err
+	}
+	notes = append(notes, fmt.Sprintf("musicbrainz id override, matched blind: %s - %s", release.Artist(), release.Title))
+	if coverage < 0.8 {
+		notes = append(notes, fmt.Sprintf("track title coverage %d%% - verify the files belong to this release", int(coverage*100)))
+	}
+	return &Result{Status: statusImported, AlbumID: albumID, Notes: notes}, nil
 }
 
 func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool) (*Result, error) {

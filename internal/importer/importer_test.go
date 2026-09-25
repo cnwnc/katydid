@@ -642,3 +642,41 @@ func creditFeaturingTrack(position int, title, main, featured string) mb.Release
 	}
 	return track
 }
+
+func TestImportMBIDOverride(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-manual", "rg-manual", "Test Album", "Test Artist", "2001-10-01",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src, MBID: "rel-manual", By: "test"})
+	if err != nil {
+		t.Fatalf("import by mbid: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: got %q, want imported (%+v)", result.Status, result)
+	}
+	wantID := filepath.Join("Test Artist", "2001 - Test Album")
+	if result.AlbumID != wantID {
+		t.Errorf("album id: got %q, want %q", result.AlbumID, wantID)
+	}
+	sc, err := sidecar.Load(filepath.Join(root, wantID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if sc.MusicBrainz.ReleaseID != "rel-manual" || sc.MusicBrainz.ReleaseGroupID != "rg-manual" {
+		t.Errorf("sidecar mb ids: %+v", sc.MusicBrainz)
+	}
+
+	if _, err := manager.Import(context.Background(), Request{Dir: src, MBID: "missing-id"}); err == nil {
+		t.Errorf("unknown mbid should fail loud")
+	}
+}

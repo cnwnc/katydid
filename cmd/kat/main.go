@@ -24,7 +24,7 @@ usage:
   kat list [query] [-artist=] [-year=] [-json] [-format=]
   kat show <album-id> [-json]
   kat check [-json]
-  kat import <dir> [-artist=] [-album=] [-year=] [-pick=N] [-skip] [-replace]
+  kat import <dir> [-artist=] [-album=] [-year=] [-mbid=] [-pick=N] [-skip] [-replace]
               [-by=] [-request="..."]
   kat decide <token> <N|skip>
   kat retag [-all | <album-id>] [-policy=]
@@ -228,6 +228,7 @@ func runImport(client *cli.Client, args []string) error {
 	artist := flags.String("artist", "", "artist hint, overrides file tags")
 	album := flags.String("album", "", "album hint, overrides file tags")
 	year := flags.Int("year", 0, "year hint, overrides file tags")
+	mbid := flags.String("mbid", "", "musicbrainz release id, skips matching entirely")
 	pick := flags.Int("pick", 0, "pick candidate N instead of prompting")
 	skip := flags.Bool("skip", false, "skip a pending decision instead of prompting")
 	replace := flags.Bool("replace", false, "replace an existing album at the target path")
@@ -246,7 +247,7 @@ func runImport(client *cli.Client, args []string) error {
 	}
 
 	result, err := client.Import(importer.Request{
-		Dir: abs, Artist: *artist, Album: *album, Year: *year,
+		Dir: abs, Artist: *artist, Album: *album, Year: *year, MBID: *mbid,
 		Replace: *replace, By: *by, Request: *request,
 	})
 	if err != nil {
