@@ -60,11 +60,11 @@ func (f *fakeSlskd) Downloads(_ context.Context) ([]slskd.UserResponse, error) {
 }
 
 type fakeKatyd struct {
-	resolve   api.ResolveResponse
-	resolveErr error
-	imported  []importer.Request
+	resolve      api.ResolveResponse
+	resolveErr   error
+	imported     []importer.Request
 	importResult importer.Result
-	decided   []string
+	decided      []string
 	decideResult importer.Result
 }
 
@@ -412,4 +412,3 @@ func TestAddValidation(t *testing.T) {
 }
 
 func strPtr(value string) *string { return &value }
-

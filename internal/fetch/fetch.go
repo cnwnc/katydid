@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"doppel.moe/katydid/internal/api"
-	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/importer"
+	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/slskd"
 )
 
@@ -56,12 +56,12 @@ type Want struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 
 	Candidates    []match.Candidate `json:"candidates,omitempty"`
-	SearchID      string                 `json:"search_id,omitempty"`
-	Peer          string                 `json:"peer,omitempty"`
-	RemoteDir     string                 `json:"remote_dir,omitempty"`
-	Enqueued      []slskd.File           `json:"enqueued,omitempty"`
-	DecisionToken string                 `json:"decision_token,omitempty"`
-	AlbumID       string                 `json:"album_id,omitempty"`
+	SearchID      string            `json:"search_id,omitempty"`
+	Peer          string            `json:"peer,omitempty"`
+	RemoteDir     string            `json:"remote_dir,omitempty"`
+	Enqueued      []slskd.File      `json:"enqueued,omitempty"`
+	DecisionToken string            `json:"decision_token,omitempty"`
+	AlbumID       string            `json:"album_id,omitempty"`
 }
 
 // Katyd is the slice of the katyd client the orchestrator needs.
@@ -492,10 +492,10 @@ func locateDownload(want *Want, downloadsDir string) (string, error) {
 // pickSource chooses the peer directory that best matches the release.
 func pickSource(search *slskd.Search, trackCount int) (string, []slskd.File, error) {
 	type dirChoice struct {
-		peer    string
-		dir     string
-		score   float64
-		files   []slskd.File
+		peer  string
+		dir   string
+		score float64
+		files []slskd.File
 	}
 	var choices []dirChoice
 	for _, response := range search.Responses {
@@ -545,7 +545,7 @@ func sourceScore(response slskd.Response, files []slskd.File, trackCount int) fl
 			lossless++
 		}
 	}
-	score += 0.3 * float64(lossless)/float64(len(files))
+	score += 0.3 * float64(lossless) / float64(len(files))
 	if response.HasFreeUploadSlot {
 		score += 0.2
 	}
