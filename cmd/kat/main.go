@@ -144,7 +144,7 @@ func runList(client *cli.Client, args []string) error {
 		return err
 	}
 	if len(albums.Albums) == 0 {
-		return fmt.Errorf("nothing could be found matching query %q", describeQuery(query))
+		return errors.New("library is empty")
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(albums)
@@ -395,21 +395,4 @@ func splitFlags(args []string, boolean map[string]bool) (positional, flagArgs []
 		}
 	}
 	return positional, flagArgs
-}
-
-func describeQuery(query library.Query) string {
-	parts := []string{}
-	if query.Q != "" {
-		parts = append(parts, query.Q)
-	}
-	if query.Artist != "" {
-		parts = append(parts, "artist="+query.Artist)
-	}
-	if query.Year != 0 {
-		parts = append(parts, fmt.Sprintf("year=%d", query.Year))
-	}
-	if len(parts) == 0 {
-		return "the whole library (it has no albums yet)"
-	}
-	return strings.Join(parts, " ")
 }
