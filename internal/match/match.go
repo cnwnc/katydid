@@ -57,6 +57,7 @@ type Candidate struct {
 	TrackCountSim float64  `json:"track_count_sim"`
 	YearSim       float64  `json:"year_sim"`
 	MBSearchScore int      `json:"mb_search_score"`
+	Pairable      bool     `json:"pairable,omitempty"`
 }
 
 func (c Candidate) Auto(ev Evidence) bool {

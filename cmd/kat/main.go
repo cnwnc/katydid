@@ -26,7 +26,7 @@ usage:
   kat check [-json]
   kat import <dir> [-artist=] [-album=] [-year=] [-mbid=] [-pick=N] [-skip] [-replace]
               [-by=] [-request="..."]
-  kat decide <token> <N|Y|skip>
+  kat decide <token> <N|Y|done|skip>, or <token> remap <file> <track>
   kat retag [-all | <album-id>] [-policy=]
 
 environment:
@@ -289,40 +289,155 @@ func handleImportResult(client *cli.Client, result importer.Result, pick int, sk
 			parts = append(parts, strings.Join(candidate.Formats, "+"))
 		}
 		parts = append(parts, fmt.Sprintf("%d tracks", candidate.TrackCount))
-		fmt.Printf("  %d. [%0.2f] %s - %s (%s)\n",
-			candidate.Number, candidate.Score, candidate.Artist, candidate.Title, strings.Join(parts, ", "))
+		marker := " "
+		if candidate.Pairable {
+			marker = "*"
+		}
+		fmt.Printf("  %s%d. [%0.2f] %s - %s (%s)\n",
+			marker, candidate.Number, candidate.Score, candidate.Artist, candidate.Title, strings.Join(parts, ", "))
+	}
+	if decision.Remap != nil {
+		fmt.Println("(*) would accept these files unchanged")
 	}
 
 	if pick != 0 {
-		return decideAndReport(client, decision.Token, pick, false)
+		return decideSend(client, decision.Token, importer.DecideInput{Pick: pick})
 	}
 	if skip {
-		return decideAndReport(client, decision.Token, 0, true)
+		return decideSend(client, decision.Token, importer.DecideInput{Skip: true})
 	}
 	if !isTerminal(os.Stdin) {
-		fmt.Printf("decision required: kat decide %s <N|skip>\n", decision.Token)
+		fmt.Printf("decision required: kat decide %s <N|Y|done|skip>, or \"kat decide %s remap <file> <track>\" to reassign\n", decision.Token, decision.Token)
 		return nil
 	}
-	fmt.Printf("use which? [1-%d/skip]: ", len(decision.Candidates))
-	line := ""
-	if _, err := fmt.Scanln(&line); err != nil {
-		return fmt.Errorf("read choice: %w", err)
-	}
-	if line == "s" || line == "skip" {
-		return decideAndReport(client, decision.Token, 0, true)
-	}
-	chosen, err := strconv.Atoi(line)
-	if err != nil {
-		return fmt.Errorf("choice %q is not a number or skip", line)
-	}
-	return decideAndReport(client, decision.Token, chosen, false)
+	return decideInteractive(client, result)
 }
 
-func decideAndReport(client *cli.Client, token string, pick int, skip bool) error {
-	result, err := client.Decide(token, pick, skip)
-	if err != nil {
-		return err
+// decideInteractive drives the decide/remap conversation: candidate
+// choice, then the file-to-track table when the pick does not fit.
+func decideInteractive(client *cli.Client, result importer.Result) error {
+	token := result.Decision.Token
+	for {
+		if result.Status == "imported" || result.Status == "skipped" {
+			return reportResult(result)
+		}
+		decision := result.Decision
+		if decision.Remap == nil {
+			choice, err := promptChoice(len(decision.Candidates))
+			if err != nil {
+				return err
+			}
+			if choice == "skip" {
+				return decideSend(client, token, importer.DecideInput{Skip: true})
+			}
+			if choice == "y" || choice == "Y" {
+				result, err = client.Decide(token, importer.DecideInput{Pick: 1})
+			} else {
+				chosen, convErr := strconv.Atoi(choice)
+				if convErr != nil {
+					fmt.Printf("%q is not a number or skip\n", choice)
+					continue
+				}
+				result, err = client.Decide(token, importer.DecideInput{Pick: chosen})
+			}
+			if err != nil {
+				return err
+			}
+			printDecisionState(result)
+			continue
+		}
+		printRemapTable(decision.Remap)
+		action, err := promptRemap(decision.Remap)
+		if err != nil {
+			return err
+		}
+		switch action.kind {
+		case remapPair:
+			result, err = client.Decide(token, importer.DecideInput{RemapFile: action.file, RemapTrack: action.track})
+		case remapAccept:
+			result, err = client.Decide(token, importer.DecideInput{Accept: true})
+		case remapSkip:
+			return decideSend(client, token, importer.DecideInput{Skip: true})
+		}
+		if err != nil {
+			return err
+		}
+		printDecisionState(result)
 	}
+}
+
+func promptChoice(count int) (string, error) {
+	fmt.Printf("use which? [1-%d/skip]: ", count)
+	line := ""
+	if _, err := fmt.Scanln(&line); err != nil {
+		return "", fmt.Errorf("read choice: %w", err)
+	}
+	return line, nil
+}
+
+func printRemapTable(table *importer.Remap) {
+	fmt.Printf("pairing for candidate %d (files 1-%d, tracks 1-%d):\n", table.Pick, len(table.Files), len(table.Tracks))
+	for _, file := range table.Files {
+		if trackIndex, ok := table.Map[file.Index]; ok {
+			track := table.Tracks[trackIndex-1]
+			fmt.Printf("  %02d: %q -> %s %s\n", file.Index, file.File, track.Number, track.Title)
+		} else {
+			fmt.Printf("  %02d: %q\n", file.Index, file.File)
+		}
+	}
+}
+
+const (
+	remapPair   = "pair"
+	remapAccept = "accept"
+	remapSkip   = "skip"
+)
+
+type remapAction struct {
+	kind  string
+	file  int
+	track int
+}
+
+func promptRemap(table *importer.Remap) (remapAction, error) {
+	for {
+		fmt.Printf("file index (done/skip): ")
+		line := ""
+		if _, err := fmt.Scanln(&line); err != nil {
+			return remapAction{}, fmt.Errorf("read file index: %w", err)
+		}
+		switch line {
+		case "done":
+			return remapAction{kind: remapAccept}, nil
+		case "skip":
+			return remapAction{kind: remapSkip}, nil
+		}
+		file, err := strconv.Atoi(line)
+		if err != nil || file < 1 || file > len(table.Files) {
+			fmt.Printf("file index must be 1-%d\n", len(table.Files))
+			continue
+		}
+		fmt.Printf("track index: ")
+		trackLine := ""
+		if _, err := fmt.Scanln(&trackLine); err != nil {
+			return remapAction{}, fmt.Errorf("read track index: %w", err)
+		}
+		track, err := strconv.Atoi(trackLine)
+		if err != nil || track < 1 || track > len(table.Tracks) {
+			fmt.Printf("track index must be 1-%d\n", len(table.Tracks))
+			continue
+		}
+		return remapAction{kind: remapPair, file: file, track: track}, nil
+	}
+}
+
+func printDecisionState(result importer.Result) {
+	for _, note := range result.Notes {
+		fmt.Printf("note: %s\n", note)
+	}
+}
+
+func reportResult(result importer.Result) error {
 	switch result.Status {
 	case "imported":
 		if result.Format != "" {
@@ -335,10 +450,19 @@ func decideAndReport(client *cli.Client, token string, pick int, skip bool) erro
 		}
 	case "skipped":
 		fmt.Println("skipped")
-	default:
-		fmt.Printf("status: %s\n", result.Status)
 	}
 	return nil
+}
+
+func decideSend(client *cli.Client, token string, in importer.DecideInput) error {
+	result, err := client.Decide(token, in)
+	if err != nil {
+		return err
+	}
+	if result.Decision != nil && result.Decision.Remap != nil {
+		return decideInteractive(client, result)
+	}
+	return reportResult(result)
 }
 
 func isTerminal(f *os.File) bool {
@@ -350,21 +474,34 @@ func isTerminal(f *os.File) bool {
 }
 
 func runDecide(client *cli.Client, args []string) error {
+	if len(args) == 4 && args[1] == "remap" {
+		file, err := strconv.Atoi(args[2])
+		if err != nil {
+			return fmt.Errorf("file index %q is not a number", args[2])
+		}
+		track, err := strconv.Atoi(args[3])
+		if err != nil {
+			return fmt.Errorf("track index %q is not a number", args[3])
+		}
+		return decideSend(client, args[0], importer.DecideInput{RemapFile: file, RemapTrack: track})
+	}
 	if len(args) != 2 {
-		return errors.New("usage: kat decide <token> <N|Y|skip>")
+		return errors.New("usage: kat decide <token> <N|Y|done|skip>, or <token> remap <file> <track>")
 	}
 	token := args[0]
-	if args[1] == "skip" {
-		return decideAndReport(client, token, 0, true)
-	}
-	if args[1] == "y" || args[1] == "Y" {
-		return decideAndReport(client, token, 1, false)
+	switch args[1] {
+	case "skip":
+		return decideSend(client, token, importer.DecideInput{Skip: true})
+	case "done":
+		return decideSend(client, token, importer.DecideInput{Accept: true})
+	case "y", "Y":
+		return decideSend(client, token, importer.DecideInput{Pick: 1})
 	}
 	chosen, err := strconv.Atoi(args[1])
 	if err != nil {
-		return fmt.Errorf("pick %q is not a number or skip", args[1])
+		return fmt.Errorf("pick %q is not a number, done, or skip", args[1])
 	}
-	return decideAndReport(client, token, chosen, false)
+	return decideSend(client, token, importer.DecideInput{Pick: chosen})
 }
 
 func runRetag(client *cli.Client, args []string) error {

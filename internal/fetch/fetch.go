@@ -68,7 +68,7 @@ type Want struct {
 type Katyd interface {
 	Resolve(artist, album string, year int, mbid string) (api.ResolveResponse, error)
 	Import(req importer.Request) (importer.Result, error)
-	Decide(token string, pick int, skip bool) (importer.Result, error)
+	Decide(token string, in importer.DecideInput) (importer.Result, error)
 }
 
 // Slskd is the slice of the slskd client the orchestrator needs.
@@ -232,7 +232,7 @@ func (o *Orchestrator) Decide(ctx context.Context, id string, pick int, skip boo
 		want.Candidates = nil
 		return o.beginSearchLocked(ctx, want)
 	case StateNeedsPick:
-		result, err := o.cfg.Katyd.Decide(want.DecisionToken, pick, skip)
+		result, err := o.cfg.Katyd.Decide(want.DecisionToken, importer.DecideInput{Pick: pick, Skip: skip})
 		if err != nil {
 			return Want{}, err
 		}

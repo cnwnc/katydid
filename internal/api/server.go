@@ -135,9 +135,12 @@ func (s *Server) importDecide(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
-		Token string `json:"token"`
-		Pick  int    `json:"pick"`
-		Skip  bool   `json:"skip"`
+		Token      string `json:"token"`
+		Pick       int    `json:"pick"`
+		Skip       bool   `json:"skip"`
+		Accept     bool   `json:"accept"`
+		RemapFile  int    `json:"remap_file"`
+		RemapTrack int    `json:"remap_track"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "decode request body: "+err.Error())
@@ -147,7 +150,9 @@ func (s *Server) importDecide(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "token is required")
 		return
 	}
-	result, err := s.Import.Decide(r.Context(), req.Token, req.Pick, req.Skip)
+	result, err := s.Import.Decide(r.Context(), req.Token, importer.DecideInput{
+		Pick: req.Pick, Skip: req.Skip, Accept: req.Accept, RemapFile: req.RemapFile, RemapTrack: req.RemapTrack,
+	})
 	if err != nil {
 		writeImportError(w, err)
 		return

@@ -173,14 +173,14 @@ func TestImportNeedsDecisionPickAndSkip(t *testing.T) {
 		t.Errorf("decisions list: got %d, want 1", len(manager.Decisions()))
 	}
 
-	if _, err := manager.Decide(ctx, decision.Token, 99, false); err == nil {
+	if _, err := manager.Decide(ctx, decision.Token, DecideInput{Pick: 99}); err == nil {
 		t.Errorf("pick out of range: got nil error, want failure")
 	}
-	if _, err := manager.Decide(ctx, "nope", 1, false); err == nil {
+	if _, err := manager.Decide(ctx, "nope", DecideInput{Pick: 1}); err == nil {
 		t.Errorf("unknown token: got nil error, want failure")
 	}
 
-	picked, err := manager.Decide(ctx, decision.Token, 1, false)
+	picked, err := manager.Decide(ctx, decision.Token, DecideInput{Pick: 1})
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestImportNeedsDecisionPickAndSkip(t *testing.T) {
 	if result.Status != statusNeedsDecision {
 		t.Fatalf("second status: got %q, want needs_decision", result.Status)
 	}
-	skipped, err := manager.Decide(ctx, result.Decision.Token, 0, true)
+	skipped, err := manager.Decide(ctx, result.Decision.Token, DecideInput{Skip: true})
 	if err != nil {
 		t.Fatalf("skip: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestImportMappingThroughDecisionWhenCountsDiffer(t *testing.T) {
 		t.Fatalf("status: got %q, want needs_decision (2 files vs 4 release tracks)", result.Status)
 	}
 
-	picked, err := manager.Decide(ctx, result.Decision.Token, 1, false)
+	picked, err := manager.Decide(ctx, result.Decision.Token, DecideInput{Pick: 1})
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -709,23 +709,132 @@ func TestImportRejectsUnmatchedFiles(t *testing.T) {
 	if result.Status != statusNeedsDecision {
 		t.Fatalf("status: got %q, want needs_decision (%+v)", result.Status, result)
 	}
-	if len(result.Notes) == 0 || !strings.Contains(result.Notes[0], "does not match any unclaimed release track") {
+	if len(result.Notes) == 0 || !strings.Contains(result.Notes[0], "rejected") {
 		t.Errorf("notes should explain the rejection: %+v", result.Notes)
 	}
 
 	token := result.Decision.Token
-	reparked, err := manager.Decide(context.Background(), token, 1, false)
+	reparked, err := manager.Decide(context.Background(), token, DecideInput{Pick: 1})
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
 	if reparked.Status != statusNeedsDecision || reparked.Decision.Token != token {
 		t.Fatalf("decide should re-park with the same token: %+v", reparked)
 	}
-	if len(reparked.Notes) == 0 || !strings.Contains(reparked.Notes[0], "does not match any unclaimed release track") {
-		t.Errorf("re-park notes should explain: %+v", reparked.Notes)
+	if reparked.Decision.Remap == nil {
+		t.Fatalf("re-park should carry a remap table: %+v", reparked.Decision)
 	}
-	skipped, err := manager.Decide(context.Background(), token, 0, true)
-	if err != nil || skipped.Status != statusSkipped {
-		t.Fatalf("skip after re-park: %+v err %v", skipped, err)
+	if len(reparked.Decision.Remap.Files) != 5 || len(reparked.Decision.Remap.Tracks) != 4 {
+		t.Fatalf("remap table: %d files, %d tracks", len(reparked.Decision.Remap.Files), len(reparked.Decision.Remap.Tracks))
+	}
+	if _, unassigned := reparked.Decision.Remap.Map[5]; unassigned {
+		t.Fatalf("file 5 should be unpaired: %+v", reparked.Decision.Remap.Map)
+	}
+
+	accepted, err := manager.Decide(context.Background(), token, DecideInput{Accept: true})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if accepted.Status != statusImported || accepted.AlbumID == "" {
+		t.Fatalf("accept: %+v err %v", accepted, err)
+	}
+	dropNote := false
+	for _, note := range accepted.Notes {
+		if strings.Contains(note, "left out 1 file(s)") {
+			dropNote = true
+		}
+	}
+	if !dropNote {
+		t.Errorf("accept should note the dropped file: %+v", accepted.Notes)
+	}
+	sc, err := sidecar.Load(filepath.Join(root, accepted.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 4 {
+		t.Errorf("published %d tracks, want 4 (outtake left out)", len(sc.Tracks))
+	}
+}
+
+func TestImportRemapPairsMismatchedFiles(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-2", "rg-2", "An Awesome Wave", "alt-J", "2012-05-25", 2)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-2", "rg-2", "An Awesome Wave", "alt-J", "2012-05-25",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "Intro"), mbtest.Track(2, "Bloodflood"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := t.TempDir()
+	testaudio.MakeTracked(t, src, "01 Intro.flac", "Intro", "alt-J", "An Awesome Wave", 1, 1, 2012)
+	testaudio.MakeTracked(t, src, "01 Intro.1.flac", "Intro", "alt-J", "An Awesome Wave", 1, 1, 2012)
+	testaudio.MakeTracked(t, src, "02 Bloodflood.flac", "Bloodflood", "alt-J", "An Awesome Wave", 2, 1, 2012)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusNeedsDecision {
+		t.Fatalf("status: got %q (%+v)", result.Status, result)
+	}
+	token := result.Decision.Token
+	table, err := manager.Decide(context.Background(), token, DecideInput{Pick: 1})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if table.Decision == nil || table.Decision.Remap == nil {
+		t.Fatalf("expected a remap table, got %+v", table)
+	}
+	remap := table.Decision.Remap
+	if len(remap.Files) != 3 || len(remap.Tracks) != 2 {
+		t.Fatalf("table: %d files, %d tracks", len(remap.Files), len(remap.Tracks))
+	}
+	// greedy pairs file 1 (track number) and file 3 (title); the
+	// duplicate Intro.1 has nowhere to go
+	if got := remap.Map[1]; got != 1 {
+		t.Fatalf("file 1 should tentatively claim track 1: %+v", remap.Map)
+	}
+	if _, paired := remap.Map[2]; paired {
+		t.Fatalf("Intro.1 should start unpaired: %+v", remap.Map)
+	}
+	if got := remap.Map[3]; got != 2 {
+		t.Fatalf("Bloodflood should pair with track 2: %+v", remap.Map)
+	}
+
+	// the user knows Intro.1 is the real Intro: steal track 1 for file 2
+	steal, err := manager.Decide(context.Background(), token, DecideInput{RemapFile: 2, RemapTrack: 1})
+	if err != nil {
+		t.Fatalf("remap: %v", err)
+	}
+	if steal.Decision == nil || steal.Decision.Remap == nil {
+		t.Fatalf("after steal the table should re-print: %+v", steal)
+	}
+	if got := steal.Decision.Remap.Map[2]; got != 1 {
+		t.Errorf("file 2 should now pair track 1: %+v", steal.Decision.Remap.Map)
+	}
+	if _, paired := steal.Decision.Remap.Map[1]; paired {
+		t.Errorf("file 1 should be unpaired after the steal: %+v", steal.Decision.Remap.Map)
+	}
+
+	// file 1 is the alternate take: it does not belong on the release
+	accepted, err := manager.Decide(context.Background(), token, DecideInput{Accept: true})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if accepted.Status != statusImported {
+		t.Fatalf("accept: %+v", accepted)
+	}
+	sc, err := sidecar.Load(filepath.Join(root, accepted.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 2 || sc.Tracks[0].Title != "Intro" {
+		t.Fatalf("tracks: %+v", sc.Tracks)
+	}
+	if sc.Tracks[0].Title != "Intro" || sc.Tracks[0].Track != 1 {
+		t.Errorf("remapped track: %+v", sc.Tracks[0])
 	}
 }

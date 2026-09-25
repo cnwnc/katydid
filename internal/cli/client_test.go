@@ -210,7 +210,7 @@ func TestImportEndpointsOverSocket(t *testing.T) {
 		t.Errorf("conflicting import: got %v, want exists failure", err)
 	}
 
-	_, err = client.Decide("nope", 1, false)
+	_, err = client.Decide("nope", importer.DecideInput{Pick: 1})
 	if err == nil || !strings.Contains(err.Error(), "no pending decision") {
 		t.Errorf("decide unknown token: got %v, want no-decision failure", err)
 	}

@@ -77,7 +77,7 @@ func (f *fakeKatyd) Import(req importer.Request) (importer.Result, error) {
 	return f.importResult, nil
 }
 
-func (f *fakeKatyd) Decide(token string, _ int, _ bool) (importer.Result, error) {
+func (f *fakeKatyd) Decide(token string, _ importer.DecideInput) (importer.Result, error) {
 	f.decided = append(f.decided, token)
 	return f.decideResult, nil
 }

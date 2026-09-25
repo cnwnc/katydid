@@ -73,12 +73,17 @@ func (c *Client) Import(req importer.Request) (importer.Result, error) {
 	return out, c.postJSON("/import", req, &out)
 }
 
-func (c *Client) Decide(token string, pick int, skip bool) (importer.Result, error) {
+func (c *Client) Decide(token string, in importer.DecideInput) (importer.Result, error) {
+	return c.DecideFull(token, in)
+}
+
+// DecideFull sends the full decide input: picks, adds a remap pair,
+// accepts the current pairing, or skips.
+func (c *Client) DecideFull(token string, in importer.DecideInput) (importer.Result, error) {
 	body := struct {
+		importer.DecideInput
 		Token string `json:"token"`
-		Pick  int    `json:"pick"`
-		Skip  bool   `json:"skip"`
-	}{Token: token, Pick: pick, Skip: skip}
+	}{DecideInput: in, Token: token}
 	var out importer.Result
 	return out, c.postJSON("/import/decide", body, &out)
 }

@@ -52,6 +52,40 @@ type Decision struct {
 	Dir        string            `json:"dir"`
 	Evidence   match.Evidence    `json:"evidence"`
 	Candidates []match.Candidate `json:"candidates"`
+	Remap      *Remap            `json:"remap,omitempty"`
+}
+
+// Remap is the manual file-to-track pairing table for a release whose
+// track list does not line up with the directory. Indexes are 1-based;
+// files absent from Map are unpaired.
+type Remap struct {
+	Pick   int          `json:"pick"`
+	Files  []RemapFile  `json:"files"`
+	Tracks []RemapTrack `json:"tracks"`
+	Map    map[int]int  `json:"map"`
+}
+
+type RemapFile struct {
+	Index int    `json:"index"`
+	File  string `json:"file"`
+	Title string `json:"title"`
+}
+
+type RemapTrack struct {
+	Index  int    `json:"index"`
+	Number string `json:"number"`
+	Title  string `json:"title"`
+}
+
+// DecideInput is one interaction with a pending decision: pick a
+// candidate, add one remap pair, accept the current pairing (leaving
+// unpaired files out of the import), or skip.
+type DecideInput struct {
+	Pick       int  `json:"pick"`
+	Skip       bool `json:"skip"`
+	Accept     bool `json:"accept"`
+	RemapFile  int  `json:"remap_file"`
+	RemapTrack int  `json:"remap_track"`
 }
 
 type Result struct {
@@ -74,6 +108,8 @@ type pending struct {
 	evidence   match.Evidence
 	files      []sourceFile
 	candidates []match.Candidate
+	pick       int
+	overrides  map[int]int
 }
 
 type Manager struct {
@@ -121,7 +157,7 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 			return nil, err
 		}
 		if coverage := match.Coverage(evidence.TrackTitles, release); coverage >= 0.8 {
-			albumID, importedNotes, err := m.publish(req, release, files)
+			albumID, importedNotes, err := m.publish(req, release, files, nil, false)
 			if err == nil {
 				return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: importedNotes}, nil
 			}
@@ -129,6 +165,8 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 				return nil, err
 			}
 			notes = append(notes, fmt.Sprintf("top candidate %s - %s rejected: %v", release.Artist(), release.Title, err))
+		} else {
+			notes = append(notes, fmt.Sprintf("top candidate %s - %s matches by name but only %d%% of the file titles appear in its track list", release.Artist(), release.Title, int(coverage*100)))
 		}
 	}
 
@@ -161,7 +199,7 @@ func (m *Manager) importByMBID(ctx context.Context, req Request, files []sourceF
 		return nil, fmt.Errorf("musicbrainz override %s: %w", req.MBID, err)
 	}
 	coverage := match.Coverage(evidence.TrackTitles, release)
-	albumID, notes, err := m.publish(req, release, files)
+	albumID, notes, err := m.publish(req, release, files, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +210,7 @@ func (m *Manager) importByMBID(ctx context.Context, req Request, files []sourceF
 	return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}, nil
 }
 
-func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool) (*Result, error) {
+func (m *Manager) Decide(ctx context.Context, token string, in DecideInput) (*Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -180,36 +218,125 @@ func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNoDecision, token)
 	}
-	if !skip && (pick < 1 || pick > len(p.candidates)) {
-		return nil, fmt.Errorf("pick %d out of range 1..%d", pick, len(p.candidates))
-	}
-
-	if skip {
+	if in.Skip {
 		delete(m.decisions, token)
 		return &Result{Status: statusSkipped}, nil
 	}
+	if in.Pick != 0 {
+		if in.Pick < 1 || in.Pick > len(p.candidates) {
+			return nil, fmt.Errorf("pick %d out of range 1..%d", in.Pick, len(p.candidates))
+		}
+		p.pick = in.Pick
+		p.overrides = nil
+	}
+	if p.pick == 0 {
+		return nil, errors.New("no candidate picked for this decision yet")
+	}
 
-	release, err := m.mb.LookupRelease(ctx, p.candidates[pick-1].ReleaseID)
+	if in.RemapFile != 0 {
+		if in.RemapTrack == 0 {
+			return nil, errors.New("remap needs a file index and a track index")
+		}
+		if p.overrides == nil {
+			p.overrides = map[int]int{}
+		}
+		p.overrides[in.RemapFile] = in.RemapTrack
+	}
+
+	release, err := m.mb.LookupRelease(ctx, p.candidates[p.pick-1].ReleaseID)
 	if err != nil {
 		delete(m.decisions, token)
 		return nil, err
 	}
-	albumID, notes, err := m.publish(p.request, release, p.files)
-	if errors.Is(err, ErrUnmatchedFiles) {
-		// The picked release does not actually contain these files; keep
-		// the decision open so another candidate can be picked or skipped.
-		return &Result{Status: statusNeedsDecision, Notes: []string{err.Error()}, Decision: &Decision{
-			Token:      token,
-			Dir:        p.request.Dir,
-			Evidence:   p.evidence,
-			Candidates: p.candidates,
-		}}, nil
-	}
-	delete(m.decisions, token)
+
+	ordered := orderFiles(p.files)
+	pairing, unpaired, err := pairFiles(ordered, release, p.overrides)
 	if err != nil {
 		return nil, err
 	}
+
+	if len(unpaired) > 0 && !in.Accept {
+		return m.remapResult(ctx, token, p, release, pairing, unpaired)
+	}
+
+	albumID, notes, err := m.publish(p.request, release, p.files, p.overrides, in.Accept)
+	if err != nil {
+		delete(m.decisions, token)
+		return nil, err
+	}
+	delete(m.decisions, token)
 	return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}, nil
+}
+
+// remapResult keeps the decision open and reports the file-to-track
+// table plus which other candidates would accept the files unchanged.
+func (m *Manager) remapResult(ctx context.Context, token string, p *pending, release *mb.Release, pairing map[int]int, unpaired []int) (*Result, error) {
+	notes := []string{
+		fmt.Sprintf("%s - %s leaves %d of %d files unplaced", release.Artist(), release.Title, len(unpaired), len(p.files)),
+	}
+	ordered := orderFiles(p.files)
+	for _, fileIndex := range unpaired {
+		notes = append(notes, fmt.Sprintf("no place for %q", ordered[fileIndex-1].base))
+	}
+
+	pickedID := p.candidates[p.pick-1].ReleaseID
+	pairableCount := 0
+	reordered := make([]match.Candidate, 0, len(p.candidates))
+	failed := make([]match.Candidate, 0, len(p.candidates))
+	for i, candidate := range p.candidates {
+		candidate.Pairable = false
+		if i+1 == p.pick {
+			failed = append(failed, candidate)
+			continue
+		}
+		other, err := m.mb.LookupRelease(ctx, candidate.ReleaseID)
+		if err == nil && filesPair(p.files, other) {
+			candidate.Pairable = true
+			pairableCount++
+			reordered = append(reordered, candidate)
+			continue
+		}
+		failed = append(failed, candidate)
+	}
+	reordered = append(reordered, failed...)
+	for i := range reordered {
+		reordered[i].Number = i + 1
+		if reordered[i].ReleaseID == pickedID {
+			p.pick = i + 1
+		}
+	}
+	p.candidates = reordered
+	if pairableCount > 0 {
+		notes = append(notes, fmt.Sprintf("%d other candidate(s) accept these files unchanged (marked * below)", pairableCount))
+	}
+	notes = append(notes, "reassign with \"kat decide <token> remap <file> <track>\", accept with \"kat decide <token> done\"; unpaired files are left out of the import")
+
+	return &Result{Status: statusNeedsDecision, Notes: notes, Decision: &Decision{
+		Token:      token,
+		Dir:        p.request.Dir,
+		Evidence:   p.evidence,
+		Candidates: reordered,
+		Remap:      buildRemap(p.pick, ordered, release, pairing),
+	}}, nil
+}
+
+// buildRemap renders the pairing table shown to the user.
+func buildRemap(pick int, ordered []sourceFile, release *mb.Release, pairing map[int]int) *Remap {
+	table := &Remap{Pick: pick, Map: map[int]int{}}
+	for i, file := range ordered {
+		table.Files = append(table.Files, RemapFile{
+			Index: i + 1,
+			File:  file.base,
+			Title: firstNonEmpty(file.tags.Title, titleFromFilename(file.base)),
+		})
+	}
+	for i, track := range release.FlattenedTracks() {
+		table.Tracks = append(table.Tracks, RemapTrack{Index: i + 1, Number: track.Number, Title: track.Title})
+	}
+	for fileIndex, trackIndex := range pairing {
+		table.Map[fileIndex] = trackIndex
+	}
+	return table
 }
 
 // Resolve ranks musicbrainz candidates for a bare specifier (no files). Used
@@ -378,7 +505,7 @@ func sortFiles(files []sourceFile) []sourceFile {
 	return out
 }
 
-func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) (albumID string, notes []string, err error) {
+func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile, overrides map[int]int, allowDrop bool) (albumID string, notes []string, err error) {
 	root := m.index.Root()
 	cfg, err := policy.Ensure(root)
 	if err != nil {
@@ -421,16 +548,42 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 	}
 	defer os.RemoveAll(stage)
 
-	copied, err := copyFiles(files, stage)
+	ordered := orderFiles(files)
+	pairing, unpaired, err := pairFiles(ordered, release, overrides)
 	if err != nil {
 		return "", nil, err
+	}
+	if len(unpaired) > 0 && !allowDrop {
+		names := []string{}
+		for _, fileIndex := range unpaired {
+			names = append(names, ordered[fileIndex-1].base)
+		}
+		return "", nil, fmt.Errorf("%w: %d of %d files have no place in %s - %s: %s", ErrUnmatchedFiles, len(unpaired), len(ordered), release.Artist(), release.Title, strings.Join(names, ", "))
 	}
 
-	tracks, trackNotes, err := mapTracks(copied, release)
-	if err != nil {
-		return "", nil, err
+	flattened := release.FlattenedTracks()
+	mediumOf := mediumPositions(release)
+	tracks := make([]sidecar.Track, 0, len(pairing))
+	copied := make([]stagedFile, 0, len(pairing))
+	for i, file := range ordered {
+		trackIndex, ok := pairing[i+1]
+		if !ok {
+			continue
+		}
+		dest := filepath.Join(stage, file.base)
+		if err := copyFile(file.path, dest); err != nil {
+			return "", nil, err
+		}
+		copied = append(copied, stagedFile{base: file.base, ext: file.ext, tags: file.tags})
+		tracks = append(tracks, trackFromRelease(file, flattened[trackIndex-1], mediumOf[trackIndex-1]))
 	}
-	notes = append(notes, trackNotes...)
+	if len(unpaired) > 0 {
+		names := []string{}
+		for _, fileIndex := range unpaired {
+			names = append(names, ordered[fileIndex-1].base)
+		}
+		notes = append(notes, fmt.Sprintf("left out %d file(s) not part of the release: %s", len(unpaired), strings.Join(names, ", ")))
+	}
 
 	sc := &sidecar.Album{
 		Album:       albumTitle,
@@ -684,18 +837,6 @@ type stagedFile struct {
 	tags tags.Tags
 }
 
-func copyFiles(files []sourceFile, stage string) ([]stagedFile, error) {
-	out := make([]stagedFile, 0, len(files))
-	for _, file := range files {
-		dest := filepath.Join(stage, file.base)
-		if err := copyFile(file.path, dest); err != nil {
-			return nil, err
-		}
-		out = append(out, stagedFile{base: file.base, ext: file.ext, tags: file.tags})
-	}
-	return out, nil
-}
-
 func probeDir(dir string) ([]sourceFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -773,13 +914,10 @@ func copyFile(src, dest string) error {
 	return nil
 }
 
-// mapTracks pairs staged files with release tracks; a directory that does
-// not correspond to the release is rejected rather than imported verbatim.
-func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []string, error) {
-	tracks := release.FlattenedTracks()
-	notes := []string{}
-
-	ordered := make([]stagedFile, len(files))
+// orderFiles returns the files in canonical pairing order: disc, track
+// number, then name.
+func orderFiles(files []sourceFile) []sourceFile {
+	ordered := make([]sourceFile, len(files))
 	copy(ordered, files)
 	sort.Slice(ordered, func(i, j int) bool {
 		a, b := ordered[i].tags, ordered[j].tags
@@ -791,39 +929,73 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 		}
 		return ordered[i].base < ordered[j].base
 	})
+	return ordered
+}
 
-	if len(ordered) == len(tracks) {
-		out := make([]sidecar.Track, 0, len(ordered))
-		mediumOf := mediumPositions(release)
-		for i, file := range ordered {
-			out = append(out, trackFromRelease(file, tracks[i], mediumOf[i]))
+// pairFiles assigns files to release tracks. Overrides (1-based file
+// index to 1-based track index) are applied first and may steal tracks
+// from the greedy pass; the rest match by disc/track number, then title
+// similarity, with equal-count directories pairing positionally.
+// Unpaired files are reported, never an error.
+func pairFiles(ordered []sourceFile, release *mb.Release, overrides map[int]int) (map[int]int, []int, error) {
+	tracks := release.FlattenedTracks()
+	pairing := map[int]int{}
+	for fileIndex, trackIndex := range overrides {
+		if fileIndex < 1 || fileIndex > len(ordered) {
+			return nil, nil, fmt.Errorf("remap file index %d out of range 1..%d", fileIndex, len(ordered))
 		}
-		return out, notes, nil
+		if trackIndex < 1 || trackIndex > len(tracks) {
+			return nil, nil, fmt.Errorf("remap track index %d out of range 1..%d", trackIndex, len(tracks))
+		}
+		if prev, ok := pairing[fileIndex]; ok && prev != trackIndex {
+			return nil, nil, fmt.Errorf("remap assigns file %d to both track %d and %d", fileIndex, prev, trackIndex)
+		}
+		pairing[fileIndex] = trackIndex
+	}
+	claimed := map[int]bool{}
+	for _, trackIndex := range pairing {
+		if claimed[trackIndex] {
+			return nil, nil, fmt.Errorf("remap assigns track %d to more than one file", trackIndex)
+		}
+		claimed[trackIndex] = true
 	}
 
-	used := make([]bool, len(tracks))
-	out := make([]sidecar.Track, 0, len(ordered))
+	if len(overrides) == 0 && len(ordered) == len(tracks) {
+		for i := range ordered {
+			pairing[i+1] = i + 1
+		}
+		return pairing, nil, nil
+	}
+
 	mediumOf := mediumPositions(release)
+	used := make([]bool, len(tracks))
+	for _, trackIndex := range pairing {
+		used[trackIndex-1] = true
+	}
 
-	for _, file := range ordered {
+	unpaired := []int{}
+	for i, file := range ordered {
+		fileIndex := i + 1
+		if _, forced := pairing[fileIndex]; forced {
+			continue
+		}
 		index := -1
-
 		if file.tags.DiscNumber != 0 && file.tags.TrackNumber != 0 {
-			for i, track := range tracks {
-				if !used[i] && mediumOf[i] == file.tags.DiscNumber && track.Position == file.tags.TrackNumber {
-					index = i
+			for j, track := range tracks {
+				if !used[j] && mediumOf[j] == file.tags.DiscNumber && track.Position == file.tags.TrackNumber {
+					index = j
 					break
 				}
 			}
 		}
 		if index < 0 {
 			best, bestSim := -1, 0.0
-			for i, track := range tracks {
-				if used[i] {
+			for j, track := range tracks {
+				if used[j] {
 					continue
 				}
 				if sim := match.Similarity(firstNonEmpty(file.tags.Title, titleFromFilename(file.base)), track.Title); sim > bestSim {
-					best, bestSim = i, sim
+					best, bestSim = j, sim
 				}
 			}
 			if bestSim >= 0.6 {
@@ -831,12 +1003,20 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 			}
 		}
 		if index < 0 {
-			return nil, nil, fmt.Errorf("%w: file %q does not match any unclaimed release track (disc %d, track %d, title %q)", ErrUnmatchedFiles, file.base, file.tags.DiscNumber, file.tags.TrackNumber, firstNonEmpty(file.tags.Title, titleFromFilename(file.base)))
+			unpaired = append(unpaired, fileIndex)
+			continue
 		}
 		used[index] = true
-		out = append(out, trackFromRelease(file, tracks[index], mediumOf[index]))
+		pairing[fileIndex] = index + 1
 	}
-	return out, notes, nil
+	return pairing, unpaired, nil
+}
+
+// filesPair reports whether the directory's files would pair cleanly
+// onto the release, without staging or copying anything.
+func filesPair(files []sourceFile, release *mb.Release) bool {
+	_, unpaired, err := pairFiles(orderFiles(files), release, nil)
+	return err == nil && len(unpaired) == 0
 }
 
 // RetagResult reports one album's retag outcome.
@@ -846,8 +1026,6 @@ type RetagResult struct {
 	Error   string   `json:"error,omitempty"`
 }
 
-// Retag brings one sidecar-backed album under a policy: renames files to the
-// template, rewrites tags to the payload, and records the new tag state.
 func (m *Manager) Retag(albumID, policyName string) RetagResult {
 	root := m.index.Root()
 	result := RetagResult{AlbumID: albumID}
@@ -979,7 +1157,7 @@ func (m *Manager) RetagAll(policyName string) []RetagResult {
 	return results
 }
 
-func trackFromRelease(file stagedFile, releaseTrack mb.ReleaseTrack, disc int) sidecar.Track {
+func trackFromRelease(file sourceFile, releaseTrack mb.ReleaseTrack, disc int) sidecar.Track {
 	credit := mb.CreditName(releaseTrack.ArtistCredit)
 	if credit == "" {
 		credit = firstNonEmpty(file.tags.Artists...)
@@ -1018,7 +1196,7 @@ func mediumPositions(release *mb.Release) []int {
 	return positions
 }
 
-func trackLength(track mb.ReleaseTrack, file stagedFile) float64 {
+func trackLength(track mb.ReleaseTrack, file sourceFile) float64 {
 	if track.Length > 0 {
 		return float64(track.Length) / 1000
 	}
@@ -1072,7 +1250,7 @@ func modalGenre(files []sourceFile) string {
 	})
 }
 
-func trackArtistsFromTags(file stagedFile) []string {
+func trackArtistsFromTags(file sourceFile) []string {
 	if len(file.tags.Artists) > 0 {
 		return file.tags.Artists
 	}
