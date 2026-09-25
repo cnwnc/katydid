@@ -770,7 +770,8 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 		return ordered[i].base < ordered[j].base
 	})
 
-	if len(ordered) == len(tracks) {		out := make([]sidecar.Track, 0, len(ordered))
+	if len(ordered) == len(tracks) {
+		out := make([]sidecar.Track, 0, len(ordered))
 		mediumOf := mediumPositions(release)
 		for i, file := range ordered {
 			out = append(out, trackFromRelease(file, tracks[i], mediumOf[i]))
