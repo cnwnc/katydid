@@ -72,16 +72,7 @@ func (ix *Index) Scan() error {
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	sort.Slice(albums, func(i, j int) bool {
-		a, b := albums[i], albums[j]
-		if strings.ToLower(a.Meta.AlbumArtist) != strings.ToLower(b.Meta.AlbumArtist) {
-			return strings.ToLower(a.Meta.AlbumArtist) < strings.ToLower(b.Meta.AlbumArtist)
-		}
-		if a.Meta.Year != b.Meta.Year {
-			return a.Meta.Year < b.Meta.Year
-		}
-		return strings.ToLower(a.Meta.Album) < strings.ToLower(b.Meta.Album)
-	})
+	sort.Slice(albums, func(i, j int) bool { return compareAlbums(albums[i], albums[j]) })
 
 	byID := make(map[string]*Album, len(albums))
 	for i := range albums {
@@ -95,6 +86,34 @@ func (ix *Index) Scan() error {
 	ix.scannedAt = time.Now()
 	ix.scanSeconds = time.Since(started).Seconds()
 	return nil
+}
+
+func compareAlbums(a, b Album) bool {
+	if strings.ToLower(a.Meta.AlbumArtist) != strings.ToLower(b.Meta.AlbumArtist) {
+		return strings.ToLower(a.Meta.AlbumArtist) < strings.ToLower(b.Meta.AlbumArtist)
+	}
+	if a.Meta.Year != b.Meta.Year {
+		return a.Meta.Year < b.Meta.Year
+	}
+	return strings.ToLower(a.Meta.Album) < strings.ToLower(b.Meta.Album)
+}
+
+// upsertAlbum replaces one album in place or inserts it in sort order.
+// The caller holds the write lock.
+func (ix *Index) upsertAlbum(album Album) {
+	for i := range ix.albums {
+		if ix.albums[i].ID == album.ID {
+			ix.albums[i] = album
+			ix.byID[album.ID] = &ix.albums[i]
+			return
+		}
+	}
+	ix.albums = append(ix.albums, album)
+	sort.Slice(ix.albums, func(i, j int) bool { return compareAlbums(ix.albums[i], ix.albums[j]) })
+	ix.byID = make(map[string]*Album, len(ix.albums))
+	for i := range ix.albums {
+		ix.byID[ix.albums[i].ID] = &ix.albums[i]
+	}
 }
 
 func (ix *Index) Albums(query Query) []Album {

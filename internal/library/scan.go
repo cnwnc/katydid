@@ -210,3 +210,41 @@ func trackMetaFromFile(absDir, file string) fileMeta {
 	meta.year = fileTags.Year
 	return meta
 }
+
+// RescanDir refreshes a single album directory, for use after targeted
+// writes like publish or retag; a full Scan is only needed when the
+// directory set itself changes.
+func (ix *Index) RescanDir(rel string) error {
+	abs := filepath.Join(ix.root, rel)
+	files := []string{}
+	err := filepath.WalkDir(abs, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path != abs && strings.HasPrefix(entry.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !IsAudio(entry.Name()) || filepath.Dir(path) != abs {
+			return nil
+		}
+		files = append(files, entry.Name())
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk %s: %w", abs, err)
+	}
+	sort.Strings(files)
+
+	album, errs := buildAlbum(ix.root, albumDir{rel: rel, abs: abs, files: files})
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.upsertAlbum(album)
+	return nil
+}

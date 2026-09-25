@@ -271,6 +271,9 @@ func handleImportResult(client *cli.Client, result importer.Result, pick int, sk
 
 	decision := result.Decision
 	ev := decision.Evidence
+	for _, note := range result.Notes {
+		fmt.Printf("note: %s\n", note)
+	}
 	fmt.Printf("low confidence for %s - %s (%d files, %d)\n", ev.Artist, ev.Album, ev.TrackCount, ev.Year)
 	fmt.Println("candidates:")
 	for _, candidate := range decision.Candidates {

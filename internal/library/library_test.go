@@ -315,3 +315,33 @@ func TestCheckNoReleaseID(t *testing.T) {
 		}
 	}
 }
+
+func TestRescanDir(t *testing.T) {
+	root := writeLibrary(t)
+	ix := NewIndex(root)
+	if err := ix.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	gazaRel := filepath.Join("Gaza", "2012 - No Absolutes in Human Suffering")
+	gazaDir := filepath.Join(root, gazaRel)
+	sc, err := sidecar.Load(gazaDir)
+	if err != nil {
+		t.Fatalf("load sidecar: %v", err)
+	}
+	sc.Album = "Renamed Album"
+	if err := sidecar.Save(gazaDir, sc); err != nil {
+		t.Fatalf("save sidecar: %v", err)
+	}
+
+	if err := ix.RescanDir(gazaRel); err != nil {
+		t.Fatalf("rescan dir: %v", err)
+	}
+	albums := ix.Albums(Query{Artist: "gaza"})
+	if len(albums) != 1 || albums[0].Meta.Album != "Renamed Album" {
+		t.Fatalf("albums after rescan: %+v", albums)
+	}
+	if got := ix.Albums(Query{Artist: "aphex"}); len(got) != 1 {
+		t.Fatalf("other album lost by upsert: %+v", got)
+	}
+}

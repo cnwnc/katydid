@@ -28,6 +28,7 @@ import (
 
 var ErrTargetExists = errors.New("target album directory already exists")
 var ErrNoDecision = errors.New("no pending decision with that token")
+var ErrUnmatchedFiles = errors.New("directory does not match the release")
 
 const (
 	statusImported      = "imported"
@@ -112,17 +113,21 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("no musicbrainz candidates for %s - %s", evidence.Artist, evidence.Album)
 	}
 
+	notes := []string{}
 	if ranked[0].Auto(evidence) {
 		release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID)
 		if err != nil {
 			return nil, err
 		}
 		if coverage := match.Coverage(evidence.TrackTitles, release); coverage >= 0.8 {
-			albumID, notes, err := m.publish(req, release, files)
-			if err != nil {
+			albumID, importedNotes, err := m.publish(req, release, files)
+			if err == nil {
+				return &Result{Status: statusImported, AlbumID: albumID, Notes: importedNotes}, nil
+			}
+			if !errors.Is(err, ErrUnmatchedFiles) {
 				return nil, err
 			}
-			return &Result{Status: statusImported, AlbumID: albumID, Notes: notes}, nil
+			notes = append(notes, fmt.Sprintf("top candidate %s - %s rejected: %v", release.Artist(), release.Title, err))
 		}
 	}
 
@@ -137,7 +142,7 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 	}
 	p := &pending{request: req, evidence: evidence, files: files, candidates: top}
 	m.decisions[token] = p
-	return &Result{Status: statusNeedsDecision, Decision: &Decision{
+	return &Result{Status: statusNeedsDecision, Notes: notes, Decision: &Decision{
 		Token:      token,
 		Dir:        req.Dir,
 		Evidence:   evidence,
@@ -173,17 +178,29 @@ func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool)
 	if !skip && (pick < 1 || pick > len(p.candidates)) {
 		return nil, fmt.Errorf("pick %d out of range 1..%d", pick, len(p.candidates))
 	}
-	delete(m.decisions, token)
 
 	if skip {
+		delete(m.decisions, token)
 		return &Result{Status: statusSkipped}, nil
 	}
 
 	release, err := m.mb.LookupRelease(ctx, p.candidates[pick-1].ReleaseID)
 	if err != nil {
+		delete(m.decisions, token)
 		return nil, err
 	}
 	albumID, notes, err := m.publish(p.request, release, p.files)
+	if errors.Is(err, ErrUnmatchedFiles) {
+		// The picked release does not actually contain these files; keep
+		// the decision open so another candidate can be picked or skipped.
+		return &Result{Status: statusNeedsDecision, Notes: []string{err.Error()}, Decision: &Decision{
+			Token:      token,
+			Dir:        p.request.Dir,
+			Evidence:   p.evidence,
+			Candidates: p.candidates,
+		}}, nil
+	}
+	delete(m.decisions, token)
 	if err != nil {
 		return nil, err
 	}
@@ -468,8 +485,8 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		}
 		return "", nil, fmt.Errorf("publish %s: %w", target, err)
 	}
-	if err := m.index.Scan(); err != nil {
-		return "", nil, fmt.Errorf("rescan after import: %w", err)
+	if err := m.index.RescanDir(albumID); err != nil {
+		return "", nil, fmt.Errorf("rescan %s after import: %w", albumID, err)
 	}
 	return albumID, notes, nil
 }
@@ -809,7 +826,7 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 			}
 		}
 		if index < 0 {
-			return nil, nil, fmt.Errorf("file %q does not match any unclaimed release track (disc %d, track %d, title %q) - the directory does not match the release; import without -mbid to pick a different candidate, or wait for forced verbatim import", file.base, file.tags.DiscNumber, file.tags.TrackNumber, firstNonEmpty(file.tags.Title, titleFromFilename(file.base)))
+			return nil, nil, fmt.Errorf("%w: file %q does not match any unclaimed release track (disc %d, track %d, title %q)", ErrUnmatchedFiles, file.base, file.tags.DiscNumber, file.tags.TrackNumber, firstNonEmpty(file.tags.Title, titleFromFilename(file.base)))
 		}
 		used[index] = true
 		out = append(out, trackFromRelease(file, tracks[index], mediumOf[index]))
@@ -936,7 +953,7 @@ func (m *Manager) Retag(albumID, policyName string) RetagResult {
 		result.Error = fmt.Sprintf("publish %s: %v", dir, err)
 		return result
 	}
-	if err := m.index.Scan(); err != nil {
+	if err := m.index.RescanDir(albumID); err != nil {
 		result.Error = fmt.Sprintf("rescan: %v", err)
 		return result
 	}

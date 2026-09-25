@@ -682,10 +682,24 @@ func TestImportMBIDOverride(t *testing.T) {
 }
 
 func TestImportRejectsUnmatchedFiles(t *testing.T) {
-	startMB(t, autoFixture())
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-4", "rg-4", "Test Album", "Test Artist", "2001-10-01", 4)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-4", "rg-4", "Test Album", "Test Artist", "2001-10-01",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 4, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+					mbtest.Track(3, "Third Song"), mbtest.Track(4, "Fourth Song"),
+				}}),
+		},
+	})
 	root := t.TempDir()
-	src := twoTestFiles(t)
-	testaudio.MakeTracked(t, src, "09 - Outtake.flac", "Outtake", "Test Artist", "Test Album", 9, 2, 2001)
+	src := t.TempDir()
+	for _, spec := range []struct {
+		base, title string
+		track       int
+	}{{"01 - First Song.flac", "First Song", 1}, {"02 - Second Song.flac", "Second Song", 2}, {"03 - Third Song.flac", "Third Song", 3}, {"04 - Fourth Song.flac", "Fourth Song", 4}, {"05 - Outtake.flac", "Outtake", 5}} {
+		testaudio.MakeTracked(t, src, spec.base, spec.title, "Test Artist", "Test Album", spec.track, 1, 2001)
+	}
 	manager := newManager(t, root)
 
 	result, err := manager.Import(context.Background(), Request{Dir: src})
@@ -693,17 +707,25 @@ func TestImportRejectsUnmatchedFiles(t *testing.T) {
 		t.Fatalf("import: %v", err)
 	}
 	if result.Status != statusNeedsDecision {
-		t.Fatalf("status: got %q, want needs_decision", result.Status)
+		t.Fatalf("status: got %q, want needs_decision (%+v)", result.Status, result)
 	}
-	_, err = manager.Decide(context.Background(), result.Decision.Token, 1, false)
-	if err == nil {
-		t.Fatalf("decide with unmatched file: got nil error, want rejection")
+	if len(result.Notes) == 0 || !strings.Contains(result.Notes[0], "does not match any unclaimed release track") {
+		t.Errorf("notes should explain the rejection: %+v", result.Notes)
 	}
-	if !strings.Contains(err.Error(), "does not match any unclaimed release track") {
-		t.Errorf("error should name the offending file: %v", err)
+
+	token := result.Decision.Token
+	reparked, err := manager.Decide(context.Background(), token, 1, false)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
 	}
-	_, err = manager.Decide(context.Background(), result.Decision.Token, 1, false)
-	if err == nil || !strings.Contains(err.Error(), "no pending decision") {
-		t.Errorf("failed decide should drop the decision, got %v", err)
+	if reparked.Status != statusNeedsDecision || reparked.Decision.Token != token {
+		t.Fatalf("decide should re-park with the same token: %+v", reparked)
+	}
+	if len(reparked.Notes) == 0 || !strings.Contains(reparked.Notes[0], "does not match any unclaimed release track") {
+		t.Errorf("re-park notes should explain: %+v", reparked.Notes)
+	}
+	skipped, err := manager.Decide(context.Background(), token, 0, true)
+	if err != nil || skipped.Status != statusSkipped {
+		t.Fatalf("skip after re-park: %+v err %v", skipped, err)
 	}
 }

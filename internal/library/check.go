@@ -27,12 +27,16 @@ const (
 )
 
 func (ix *Index) Check() []Finding {
+	// Snapshot the album list, then do the tag reads without holding the
+	// lock: a full check is slow IO and must not stall scans or imports.
 	ix.mu.RLock()
-	defer ix.mu.RUnlock()
+	albums := make([]Album, len(ix.albums))
+	copy(albums, ix.albums)
+	ix.mu.RUnlock()
 
 	findings := []Finding{}
-	for i := range ix.albums {
-		album := &ix.albums[i]
+	for i := range albums {
+		album := &albums[i]
 		if album.Pending {
 			findings = append(findings, Finding{Album: album.ID, Kind: KindPendingImport})
 			continue
