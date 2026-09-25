@@ -45,8 +45,8 @@ type Search struct {
 	ID              string     `json:"id"`
 	SearchText      string     `json:"searchText"`
 	State           string     `json:"state"`
-	StartedAt       time.Time  `json:"startedAt"`
-	EndedAt         *time.Time `json:"endedAt"`
+	StartedAt       Time       `json:"startedAt"`
+	EndedAt         *Time      `json:"endedAt"`
 	IsComplete      bool       `json:"isComplete"`
 	FileCount       int        `json:"fileCount"`
 	LockedFileCount int        `json:"lockedFileCount"`
@@ -103,16 +103,16 @@ type Transfer struct {
 	Filename         string     `json:"filename"`
 	Size             int64      `json:"size"`
 	State            string     `json:"state"`
-	RequestedAt      time.Time  `json:"requestedAt"`
-	EnqueuedAt       *time.Time `json:"enqueuedAt"`
-	StartedAt        *time.Time `json:"startedAt"`
-	EndedAt          *time.Time `json:"endedAt"`
+	RequestedAt      Time       `json:"requestedAt"`
+	EnqueuedAt       *Time      `json:"enqueuedAt"`
+	StartedAt        *Time      `json:"startedAt"`
+	EndedAt          *Time      `json:"endedAt"`
 	BytesTransferred int64      `json:"bytesTransferred"`
 	AverageSpeed     float64    `json:"averageSpeed"`
 	PlaceInQueue     *int64     `json:"placeInQueue"`
 	Exception        *string    `json:"exception"`
 	Attempts         int        `json:"attempts"`
-	NextAttemptAt    *time.Time `json:"nextAttemptAt"`
+	NextAttemptAt    *Time      `json:"nextAttemptAt"`
 	Removed          bool       `json:"removed"`
 	BytesRemaining   int64      `json:"bytesRemaining"`
 	PercentComplete  float64    `json:"percentComplete"`

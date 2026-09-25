@@ -174,3 +174,14 @@ func TestStateFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeNaiveTimestamps(t *testing.T) {
+	var out []slskd.Transfer
+	payload := []byte(`[{"id":"t1","requestedAt":"2026-06-25T01:41:01.7305916","endedAt":"2026-06-25T01:45:01Z"}]`)
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("decode naive timestamps: %v", err)
+	}
+	if out[0].RequestedAt.IsZero() {
+		t.Fatalf("requestedAt should decode")
+	}
+}
