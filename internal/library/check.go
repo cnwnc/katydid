@@ -23,6 +23,7 @@ const (
 	KindUnlistedFile  = "unlisted_file"
 	KindUntagged      = "untagged"
 	KindTagDrift      = "tag_drift"
+	KindNoReleaseID   = "no_release_id"
 )
 
 func (ix *Index) Check() []Finding {
@@ -58,6 +59,13 @@ func (ix *Index) tagFindings(album *Album) []Finding {
 	}
 
 	findings := []Finding{}
+
+	// Musicbrainz is the source of truth; without a release id the album
+	// was never verified against it, so it is potentially sketchy.
+	if sc.MusicBrainz.ReleaseID == "" {
+		findings = append(findings, Finding{Album: album.ID, Kind: KindNoReleaseID, Detail: "imported without a musicbrainz release id"})
+	}
+
 	for _, track := range sc.Tracks {
 		if track.Tags == nil {
 			continue

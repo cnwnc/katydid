@@ -50,6 +50,7 @@ func writeLibrary(t *testing.T) string {
 		AlbumArtist: "Gaza",
 		Year:        2012,
 		Provenance:  sidecar.Provenance{Imported: time.Now(), By: "test"},
+		MusicBrainz: sidecar.MusicBrainz{ReleaseID: "gaza-release", ReleaseGroupID: "gaza-group", Date: "2012"},
 		TagState:    &sidecar.TagState{Policy: "default", Applied: time.Now(), StateHash: "sha256:fixture"},
 		Tracks: []sidecar.Track{
 			{File: "01 - Mostly Hair and Bones Now.flac", Title: "Mostly Hair and Bones Now", Track: 1, LengthSeconds: 155},
@@ -272,5 +273,45 @@ func TestCheckTagDrift(t *testing.T) {
 	}
 	if !drifted {
 		t.Errorf("expected tag_drift for edited title, got %+v", ix.Check())
+	}
+}
+
+func TestCheckNoReleaseID(t *testing.T) {
+	root := writeLibrary(t)
+	gazaDir := filepath.Join(root, "Gaza", "2012 - No Absolutes in Human Suffering")
+	sc, err := sidecar.Load(gazaDir)
+	if err != nil {
+		t.Fatalf("load sidecar: %v", err)
+	}
+	sc.MusicBrainz = sidecar.MusicBrainz{}
+	if err := sidecar.Save(gazaDir, sc); err != nil {
+		t.Fatalf("save sidecar: %v", err)
+	}
+	ix := NewIndex(root)
+	if err := ix.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	found := false
+	for _, f := range ix.Check() {
+		if f.Kind == KindNoReleaseID {
+			if f.Album != filepath.Join("Gaza", "2012 - No Absolutes in Human Suffering") {
+				t.Errorf("no_release_id on wrong album: %+v", f)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected no_release_id finding, got %+v", ix.Check())
+	}
+
+	ix2 := NewIndex(writeLibrary(t))
+	if err := ix2.Scan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	for _, f := range ix2.Check() {
+		if f.Kind == KindNoReleaseID {
+			t.Errorf("healthy fixture flagged no_release_id: %+v", f)
+		}
 	}
 }
