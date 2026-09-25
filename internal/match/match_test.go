@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"doppel.moe/katydid/internal/mb"
+	"doppel.moe/katydid/internal/mb/mbtest"
 )
 
 func loadSearch(t *testing.T, name string) []mb.SearchRelease {
@@ -210,4 +211,60 @@ func TestCoverage(t *testing.T) {
 	if got := Coverage(nil, release); got != 0 {
 		t.Errorf("no evidence titles: got %f, want 0", got)
 	}
+}
+
+func TestRankPrefersOldestDate(t *testing.T) {
+	releases := []mb.SearchRelease{
+		syntheticWithMedia("remaster", "R", "Album", "Artist", "2011-01-01", 10, "CD"),
+		syntheticWithMedia("original", "O", "Album", "Artist", "1998", 10, "CD"),
+		syntheticWithMedia("dateless", "D", "Album", "Artist", "", 10, "Digital Media"),
+	}
+	ranked := Rank(Evidence{Artist: "Artist", Album: "Album", TrackCount: 10}, releases)
+	if ranked[0].ReleaseID != "original" || ranked[1].ReleaseID != "remaster" || ranked[2].ReleaseID != "dateless" {
+		t.Fatalf("order: %s, %s, %s", ranked[0].ReleaseID, ranked[1].ReleaseID, ranked[2].ReleaseID)
+	}
+}
+
+func TestRankPrefersFormatOnDateTie(t *testing.T) {
+	releases := []mb.SearchRelease{
+		syntheticWithMedia("tape", "T", "Album", "Artist", "1998", 10, "Cassette"),
+		syntheticWithMedia("vinyl", "V", "Album", "Artist", "1998", 10, `12" Vinyl`),
+		syntheticWithMedia("cd", "C", "Album", "Artist", "1998", 10, "CD"),
+		syntheticWithMedia("digital", "G", "Album", "Artist", "1998", 10, "Digital Media"),
+	}
+	ranked := Rank(Evidence{Artist: "Artist", Album: "Album", TrackCount: 10}, releases)
+	want := []string{"digital", "cd", "vinyl", "tape"}
+	for i, id := range want {
+		if ranked[i].ReleaseID != id {
+			t.Fatalf("position %d: got %s, want %s", i, ranked[i].ReleaseID, id)
+		}
+	}
+}
+
+func TestFormatPriority(t *testing.T) {
+	cases := map[string]int{
+		"Digital Media": 0, "CD": 1, `12" Vinyl`: 2, "Vinyl": 2,
+		"Cassette": 3, "8-Track Cartridge": 4, "": 4, "Mini-Disc": 4,
+	}
+	for format, want := range cases {
+		if got := FormatPriority(format); got != want {
+			t.Errorf("FormatPriority(%q) = %d, want %d", format, got, want)
+		}
+	}
+}
+
+func TestDistinctFormats(t *testing.T) {
+	media := []mb.ReleaseMedia{
+		{Format: "CD"}, {Format: "CD"}, {Format: "DVD-Video"}, {Format: ""},
+	}
+	formats := DistinctFormats(media)
+	if len(formats) != 2 || formats[0] != "CD" || formats[1] != "DVD-Video" {
+		t.Fatalf("formats: %+v", formats)
+	}
+}
+
+func syntheticWithMedia(id, _, title, artist, date string, trackCount int, format string) mb.SearchRelease {
+	release := mbtest.SyntheticSearch(id, "group-"+id, title, artist, date, trackCount)
+	release.Media = []mb.ReleaseMedia{{Position: 1, Format: format, TrackCount: trackCount}}
+	return release
 }

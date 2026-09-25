@@ -57,6 +57,7 @@ type Decision struct {
 type Result struct {
 	Status   string    `json:"status"`
 	AlbumID  string    `json:"album_id,omitempty"`
+	Format   string    `json:"format,omitempty"`
 	Decision *Decision `json:"decision,omitempty"`
 	Notes    []string  `json:"notes,omitempty"`
 }
@@ -122,7 +123,7 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 		if coverage := match.Coverage(evidence.TrackTitles, release); coverage >= 0.8 {
 			albumID, importedNotes, err := m.publish(req, release, files)
 			if err == nil {
-				return &Result{Status: statusImported, AlbumID: albumID, Notes: importedNotes}, nil
+				return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: importedNotes}, nil
 			}
 			if !errors.Is(err, ErrUnmatchedFiles) {
 				return nil, err
@@ -150,6 +151,10 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 	}}, nil
 }
 
+func formatLabel(release *mb.Release) string {
+	return strings.Join(match.DistinctFormats(release.Media), " + ")
+}
+
 func (m *Manager) importByMBID(ctx context.Context, req Request, files []sourceFile, evidence match.Evidence) (*Result, error) {
 	release, err := m.mb.LookupRelease(ctx, req.MBID)
 	if err != nil {
@@ -164,7 +169,7 @@ func (m *Manager) importByMBID(ctx context.Context, req Request, files []sourceF
 	if coverage < 0.8 {
 		notes = append(notes, fmt.Sprintf("track title coverage %d%% - verify the files belong to this release", int(coverage*100)))
 	}
-	return &Result{Status: statusImported, AlbumID: albumID, Notes: notes}, nil
+	return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}, nil
 }
 
 func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool) (*Result, error) {
@@ -204,7 +209,7 @@ func (m *Manager) Decide(ctx context.Context, token string, pick int, skip bool)
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Status: statusImported, AlbumID: albumID, Notes: notes}, nil
+	return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}, nil
 }
 
 // Resolve ranks musicbrainz candidates for a bare specifier (no files). Used

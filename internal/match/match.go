@@ -43,19 +43,20 @@ type Evidence struct {
 }
 
 type Candidate struct {
-	Number        int     `json:"number"`
-	ReleaseID     string  `json:"release_id"`
-	GroupID       string  `json:"group_id,omitempty"`
-	Title         string  `json:"title"`
-	Artist        string  `json:"artist"`
-	Date          string  `json:"date,omitempty"`
-	TrackCount    int     `json:"track_count"`
-	Score         float64 `json:"score"`
-	TitleSim      float64 `json:"title_sim"`
-	ArtistSim     float64 `json:"artist_sim"`
-	TrackCountSim float64 `json:"track_count_sim"`
-	YearSim       float64 `json:"year_sim"`
-	MBSearchScore int     `json:"mb_search_score"`
+	Number        int      `json:"number"`
+	ReleaseID     string   `json:"release_id"`
+	GroupID       string   `json:"group_id,omitempty"`
+	Title         string   `json:"title"`
+	Artist        string   `json:"artist"`
+	Date          string   `json:"date,omitempty"`
+	TrackCount    int      `json:"track_count"`
+	Formats       []string `json:"formats,omitempty"`
+	Score         float64  `json:"score"`
+	TitleSim      float64  `json:"title_sim"`
+	ArtistSim     float64  `json:"artist_sim"`
+	TrackCountSim float64  `json:"track_count_sim"`
+	YearSim       float64  `json:"year_sim"`
+	MBSearchScore int      `json:"mb_search_score"`
 }
 
 func (c Candidate) Auto(ev Evidence) bool {
@@ -89,22 +90,80 @@ func Rank(ev Evidence, releases []mb.SearchRelease) []Candidate {
 			ungrouped = append(ungrouped, candidate)
 			continue
 		}
-		if existing, ok := byGroup[groupID]; !ok || candidate.Score > existing.Score {
+		if existing, ok := byGroup[groupID]; !ok || betterCandidate(candidate, existing) {
 			byGroup[groupID] = candidate
 		}
 	}
 
 	all := append(ungrouped, mapValues(byGroup)...)
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Score != all[j].Score {
-			return all[i].Score > all[j].Score
-		}
-		return all[i].MBSearchScore > all[j].MBSearchScore
-	})
+	sort.Slice(all, func(i, j int) bool { return betterCandidate(all[i], all[j]) })
 	for i := range all {
 		all[i].Number = i + 1
 	}
 	return all
+}
+
+// RankPrefers, in order: the oldest release (dateless last), then media
+// format Digital > CD > Vinyl > Tape > Other, then musicbrainz score.
+func betterCandidate(a, b Candidate) bool {
+	if (a.Date == "") != (b.Date == "") {
+		return a.Date != ""
+	}
+	if a.Date != b.Date {
+		return a.Date < b.Date
+	}
+	pa, pb := bestFormatPriority(a.Formats), bestFormatPriority(b.Formats)
+	if pa != pb {
+		return pa < pb
+	}
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	return a.ReleaseID < b.ReleaseID
+}
+
+// FormatPriority ranks a musicbrainz medium format; lower is preferred.
+func FormatPriority(format string) int {
+	f := strings.ToLower(format)
+	switch {
+	case f == "":
+		return 4
+	case strings.Contains(f, "digital"):
+		return 0
+	case strings.Contains(f, "cd"):
+		return 1
+	case strings.Contains(f, "vinyl"):
+		return 2
+	case strings.Contains(f, "cassette"), strings.Contains(f, "tape"):
+		return 3
+	default:
+		return 4
+	}
+}
+
+func bestFormatPriority(formats []string) int {
+	best := 4
+	for _, format := range formats {
+		if p := FormatPriority(format); p < best {
+			best = p
+		}
+	}
+	return best
+}
+
+// DistinctFormats lists the unique medium formats of a release, in
+// media order.
+func DistinctFormats(media []mb.ReleaseMedia) []string {
+	formats := []string{}
+	seen := map[string]bool{}
+	for _, medium := range media {
+		if medium.Format == "" || seen[medium.Format] {
+			continue
+		}
+		seen[medium.Format] = true
+		formats = append(formats, medium.Format)
+	}
+	return formats
 }
 
 func scoreCandidate(ev Evidence, release mb.SearchRelease) Candidate {
@@ -119,6 +178,7 @@ func scoreCandidate(ev Evidence, release mb.SearchRelease) Candidate {
 		Artist:        release.Artist(),
 		Date:          release.Date,
 		TrackCount:    release.TrackCount,
+		Formats:       DistinctFormats(release.Media),
 		TitleSim:      titleSim,
 		ArtistSim:     artistSim,
 		TrackCountSim: trackCountSim,

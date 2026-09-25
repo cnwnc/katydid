@@ -166,8 +166,8 @@ func TestImportNeedsDecisionPickAndSkip(t *testing.T) {
 	if decision.Token == "" || len(decision.Candidates) == 0 {
 		t.Fatalf("decision: %+v", decision)
 	}
-	if decision.Candidates[0].ReleaseID != "rel-2" {
-		t.Errorf("top candidate: got %s, want rel-2 (artist matches)", decision.Candidates[0].ReleaseID)
+	if decision.Candidates[0].ReleaseID != "rel-1" {
+		t.Errorf("top candidate: got %s, want rel-1 (oldest date preferred)", decision.Candidates[0].ReleaseID)
 	}
 	if len(manager.Decisions()) != 1 {
 		t.Errorf("decisions list: got %d, want 1", len(manager.Decisions()))
@@ -180,7 +180,7 @@ func TestImportNeedsDecisionPickAndSkip(t *testing.T) {
 		t.Errorf("unknown token: got nil error, want failure")
 	}
 
-	picked, err := manager.Decide(ctx, decision.Token, 1, false)
+	picked, err := manager.Decide(ctx, decision.Token, 2, false)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}

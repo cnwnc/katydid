@@ -259,7 +259,11 @@ func runImport(client *cli.Client, args []string) error {
 func handleImportResult(client *cli.Client, result importer.Result, pick int, skip bool) error {
 	switch result.Status {
 	case "imported":
-		fmt.Printf("imported: %s\n", result.AlbumID)
+		if result.Format != "" {
+			fmt.Printf("imported: %s (%s)\n", result.AlbumID, result.Format)
+		} else {
+			fmt.Printf("imported: %s\n", result.AlbumID)
+		}
 		for _, note := range result.Notes {
 			fmt.Printf("note: %s\n", note)
 		}
@@ -277,8 +281,16 @@ func handleImportResult(client *cli.Client, result importer.Result, pick int, sk
 	fmt.Printf("low confidence for %s - %s (%d files, %d)\n", ev.Artist, ev.Album, ev.TrackCount, ev.Year)
 	fmt.Println("candidates:")
 	for _, candidate := range decision.Candidates {
-		fmt.Printf("  %d. [%0.2f] %s - %s (%s, %d tracks)\n",
-			candidate.Number, candidate.Score, candidate.Artist, candidate.Title, candidate.Date, candidate.TrackCount)
+		parts := []string{}
+		if candidate.Date != "" {
+			parts = append(parts, candidate.Date)
+		}
+		if len(candidate.Formats) > 0 {
+			parts = append(parts, strings.Join(candidate.Formats, "+"))
+		}
+		parts = append(parts, fmt.Sprintf("%d tracks", candidate.TrackCount))
+		fmt.Printf("  %d. [%0.2f] %s - %s (%s)\n",
+			candidate.Number, candidate.Score, candidate.Artist, candidate.Title, strings.Join(parts, ", "))
 	}
 
 	if pick != 0 {
@@ -313,7 +325,11 @@ func decideAndReport(client *cli.Client, token string, pick int, skip bool) erro
 	}
 	switch result.Status {
 	case "imported":
-		fmt.Printf("imported: %s\n", result.AlbumID)
+		if result.Format != "" {
+			fmt.Printf("imported: %s (%s)\n", result.AlbumID, result.Format)
+		} else {
+			fmt.Printf("imported: %s\n", result.AlbumID)
+		}
 		for _, note := range result.Notes {
 			fmt.Printf("note: %s\n", note)
 		}

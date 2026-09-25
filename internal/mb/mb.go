@@ -128,6 +128,7 @@ type SearchRelease struct {
 	Country      string         `json:"country"`
 	TrackCount   int            `json:"track-count"`
 	ArtistCredit []ArtistCredit `json:"artist-credit"`
+	Media        []ReleaseMedia `json:"media"`
 	ReleaseGroup *struct {
 		ID          string `json:"id"`
 		Title       string `json:"title"`
