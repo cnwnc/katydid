@@ -30,8 +30,6 @@ type wantsResponse struct {
 	Wants []Want `json:"wants"`
 }
 
-
-
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.status)
@@ -132,4 +130,3 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, map[string]string{"error": message})
 }
-

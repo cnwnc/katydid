@@ -30,54 +30,54 @@ func New(base, apiKey string) *Client {
 }
 
 type SearchRequest struct {
-	SearchText                 string `json:"searchText"`
-	ID                         string `json:"id,omitempty"`
-	FileLimit                  int    `json:"fileLimit,omitempty"`
-	FilterResponses            *bool  `json:"filterResponses,omitempty"`
-	MaximumPeerQueueLength     int    `json:"maximumPeerQueueLength,omitempty"`
-	MinimumPeerUploadSpeed     int    `json:"minimumPeerUploadSpeed,omitempty"`
-	MinimumResponseFileCount   int    `json:"minimumResponseFileCount,omitempty"`
-	ResponseLimit              int    `json:"responseLimit,omitempty"`
-	SearchTimeout              int64  `json:"searchTimeout,omitempty"`
+	SearchText               string `json:"searchText"`
+	ID                       string `json:"id,omitempty"`
+	FileLimit                int    `json:"fileLimit,omitempty"`
+	FilterResponses          *bool  `json:"filterResponses,omitempty"`
+	MaximumPeerQueueLength   int    `json:"maximumPeerQueueLength,omitempty"`
+	MinimumPeerUploadSpeed   int    `json:"minimumPeerUploadSpeed,omitempty"`
+	MinimumResponseFileCount int    `json:"minimumResponseFileCount,omitempty"`
+	ResponseLimit            int    `json:"responseLimit,omitempty"`
+	SearchTimeout            int64  `json:"searchTimeout,omitempty"`
 }
 
 type Search struct {
-	ID               string     `json:"id"`
-	SearchText       string     `json:"searchText"`
-	State            string     `json:"state"`
-	StartedAt        time.Time  `json:"startedAt"`
-	EndedAt          *time.Time `json:"endedAt"`
-	IsComplete       bool       `json:"isComplete"`
-	FileCount        int        `json:"fileCount"`
-	LockedFileCount  int        `json:"lockedFileCount"`
-	ResponseCount    int        `json:"responseCount"`
-	Token            int64      `json:"token"`
-	Responses        []Response `json:"responses"`
+	ID              string     `json:"id"`
+	SearchText      string     `json:"searchText"`
+	State           string     `json:"state"`
+	StartedAt       time.Time  `json:"startedAt"`
+	EndedAt         *time.Time `json:"endedAt"`
+	IsComplete      bool       `json:"isComplete"`
+	FileCount       int        `json:"fileCount"`
+	LockedFileCount int        `json:"lockedFileCount"`
+	ResponseCount   int        `json:"responseCount"`
+	Token           int64      `json:"token"`
+	Responses       []Response `json:"responses"`
 }
 
 type Response struct {
-	Username           string `json:"username"`
-	Token              int64  `json:"token"`
-	HasFreeUploadSlot  bool   `json:"hasFreeUploadSlot"`
-	UploadSpeed        int64  `json:"uploadSpeed"`
-	QueueLength        int64  `json:"queueLength"`
-	FileCount          int    `json:"fileCount"`
-	LockedFileCount    int    `json:"lockedFileCount"`
-	Files              []File `json:"files"`
-	LockedFiles        []File `json:"lockedFiles"`
+	Username          string `json:"username"`
+	Token             int64  `json:"token"`
+	HasFreeUploadSlot bool   `json:"hasFreeUploadSlot"`
+	UploadSpeed       int64  `json:"uploadSpeed"`
+	QueueLength       int64  `json:"queueLength"`
+	FileCount         int    `json:"fileCount"`
+	LockedFileCount   int    `json:"lockedFileCount"`
+	Files             []File `json:"files"`
+	LockedFiles       []File `json:"lockedFiles"`
 }
 
 type File struct {
-	Filename         string  `json:"filename"`
-	Size             int64   `json:"size"`
-	Extension        string  `json:"extension"`
-	BitRate          *int    `json:"bitRate"`
-	BitDepth         *int    `json:"bitDepth"`
-	SampleRate       *int    `json:"sampleRate"`
+	Filename          string `json:"filename"`
+	Size              int64  `json:"size"`
+	Extension         string `json:"extension"`
+	BitRate           *int   `json:"bitRate"`
+	BitDepth          *int   `json:"bitDepth"`
+	SampleRate        *int   `json:"sampleRate"`
 	IsVariableBitRate *bool  `json:"isVariableBitRate"`
-	Length           *int64  `json:"length"`
-	IsLocked         bool    `json:"isLocked"`
-	Code             int     `json:"code"`
+	Length            *int64 `json:"length"`
+	IsLocked          bool   `json:"isLocked"`
+	Code              int    `json:"code"`
 }
 
 type QueueDownloadRequest struct {

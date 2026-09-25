@@ -245,4 +245,3 @@ func TestRetryHonorsRetryAfter(t *testing.T) {
 		t.Errorf("elapsed %v < 1s; Retry-After was not honored", elapsed)
 	}
 }
-
