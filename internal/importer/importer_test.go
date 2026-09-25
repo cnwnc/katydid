@@ -680,3 +680,30 @@ func TestImportMBIDOverride(t *testing.T) {
 		t.Errorf("unknown mbid should fail loud")
 	}
 }
+
+func TestImportRejectsUnmatchedFiles(t *testing.T) {
+	startMB(t, autoFixture())
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	testaudio.MakeTracked(t, src, "09 - Outtake.flac", "Outtake", "Test Artist", "Test Album", 9, 2, 2001)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusNeedsDecision {
+		t.Fatalf("status: got %q, want needs_decision", result.Status)
+	}
+	_, err = manager.Decide(context.Background(), result.Decision.Token, 1, false)
+	if err == nil {
+		t.Fatalf("decide with unmatched file: got nil error, want rejection")
+	}
+	if !strings.Contains(err.Error(), "does not match any unclaimed release track") {
+		t.Errorf("error should name the offending file: %v", err)
+	}
+	_, err = manager.Decide(context.Background(), result.Decision.Token, 1, false)
+	if err == nil || !strings.Contains(err.Error(), "no pending decision") {
+		t.Errorf("failed decide should drop the decision, got %v", err)
+	}
+}

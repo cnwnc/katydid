@@ -404,7 +404,10 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile) 
 		return "", nil, err
 	}
 
-	tracks, trackNotes := mapTracks(copied, release)
+	tracks, trackNotes, err := mapTracks(copied, release)
+	if err != nil {
+		return "", nil, err
+	}
 	notes = append(notes, trackNotes...)
 
 	sc := &sidecar.Album{
@@ -748,7 +751,9 @@ func copyFile(src, dest string) error {
 	return nil
 }
 
-func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []string) {
+// mapTracks pairs staged files with release tracks; a directory that does
+// not correspond to the release is rejected rather than imported verbatim.
+func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []string, error) {
 	tracks := release.FlattenedTracks()
 	notes := []string{}
 
@@ -765,19 +770,18 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 		return ordered[i].base < ordered[j].base
 	})
 
-	if len(ordered) == len(tracks) {
-		out := make([]sidecar.Track, 0, len(ordered))
+	if len(ordered) == len(tracks) {		out := make([]sidecar.Track, 0, len(ordered))
 		mediumOf := mediumPositions(release)
 		for i, file := range ordered {
 			out = append(out, trackFromRelease(file, tracks[i], mediumOf[i]))
 		}
-		return out, notes
+		return out, notes, nil
 	}
 
 	used := make([]bool, len(tracks))
 	out := make([]sidecar.Track, 0, len(ordered))
 	mediumOf := mediumPositions(release)
-	unmatched := 0
+
 	for _, file := range ordered {
 		index := -1
 
@@ -804,17 +808,12 @@ func mapTracks(files []stagedFile, release *mb.Release) ([]sidecar.Track, []stri
 			}
 		}
 		if index < 0 {
-			unmatched++
-			out = append(out, trackFromFileOnly(file))
-			continue
+			return nil, nil, fmt.Errorf("file %q does not match any unclaimed release track (disc %d, track %d, title %q) - the directory does not match the release; import without -mbid to pick a different candidate, or wait for forced verbatim import", file.base, file.tags.DiscNumber, file.tags.TrackNumber, firstNonEmpty(file.tags.Title, titleFromFilename(file.base)))
 		}
 		used[index] = true
 		out = append(out, trackFromRelease(file, tracks[index], mediumOf[index]))
 	}
-	if unmatched > 0 {
-		notes = append(notes, fmt.Sprintf("%d of %d tracks unmatched against the release, imported with file metadata", unmatched, len(ordered)))
-	}
-	return out, notes
+	return out, notes, nil
 }
 
 // RetagResult reports one album's retag outcome.
@@ -973,20 +972,6 @@ func trackFromRelease(file stagedFile, releaseTrack mb.ReleaseTrack, disc int) s
 		Artists:        firstNonEmptyList(mb.CreditList(releaseTrack.ArtistCredit), trackArtistsFromTags(file)),
 		RecordingID:    releaseTrack.Recording.ID,
 		ReleaseTrackID: releaseTrack.ID,
-	}
-}
-
-func trackFromFileOnly(file stagedFile) sidecar.Track {
-	artists := trackArtistsFromTags(file)
-	title := firstNonEmpty(file.tags.Title, titleFromFilename(file.base))
-	return sidecar.Track{
-		File:          file.base,
-		Title:         title,
-		Track:         file.tags.TrackNumber,
-		Disc:          file.tags.DiscNumber,
-		LengthSeconds: file.tags.LengthSeconds,
-		Artist:        firstNonEmpty(artists...),
-		Artists:       artists,
 	}
 }
 
