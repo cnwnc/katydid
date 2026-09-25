@@ -149,5 +149,8 @@ func listen(socket string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", socket, err)
 	}
+	if err := os.Chmod(socket, 0o660); err != nil {
+		return nil, fmt.Errorf("chmod %s: %w", socket, err)
+	}
 	return listener, nil
 }
