@@ -26,7 +26,7 @@ usage:
   kat check [-json]
   kat import <dir> [-artist=] [-album=] [-year=] [-mbid=] [-pick=N] [-skip] [-replace]
               [-by=] [-request="..."]
-  kat decide <token> <N|skip>
+  kat decide <token> <N|Y|skip>
   kat retag [-all | <album-id>] [-policy=]
 
 environment:
@@ -332,11 +332,14 @@ func isTerminal(f *os.File) bool {
 
 func runDecide(client *cli.Client, args []string) error {
 	if len(args) != 2 {
-		return errors.New("usage: kat decide <token> <N|skip>")
+		return errors.New("usage: kat decide <token> <N|Y|skip>")
 	}
 	token := args[0]
 	if args[1] == "skip" {
 		return decideAndReport(client, token, 0, true)
+	}
+	if args[1] == "y" || args[1] == "Y" {
+		return decideAndReport(client, token, 1, false)
 	}
 	chosen, err := strconv.Atoi(args[1])
 	if err != nil {
