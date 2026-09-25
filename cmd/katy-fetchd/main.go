@@ -42,7 +42,7 @@ func run() error {
 		defaultKatyd = os.Getenv("KATYDID_SOCKET")
 	}
 	if defaultKatyd == "" {
-		defaultKatyd = filepath.Join(os.TempDir(), "katyd.sock")
+		defaultKatyd = "/run/katyd/katyd.sock"
 	}
 	defaultSlskd := os.Getenv("KATYFETCHD_SLSKD")
 	if defaultSlskd == "" {

@@ -28,7 +28,7 @@ func main() {
 func run() error {
 	defaultSocket := os.Getenv("KATYDID_SOCKET")
 	if defaultSocket == "" {
-		defaultSocket = filepath.Join(os.TempDir(), "katyd.sock")
+		defaultSocket = "/run/katyd/katyd.sock"
 	}
 	defaultLibrary := os.Getenv("KATYDID_LIBRARY")
 

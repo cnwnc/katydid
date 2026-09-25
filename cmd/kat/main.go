@@ -30,7 +30,7 @@ usage:
   kat retag [-all | <album-id>] [-policy=]
 
 environment:
-  KATYDID_SOCKET  unix socket path (default /tmp/katyd.sock)`
+  KATYDID_SOCKET  unix socket path (default /run/katyd/katyd.sock)`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -72,7 +72,7 @@ func main() {
 func Dial() *cli.Client {
 	socket := os.Getenv("KATYDID_SOCKET")
 	if socket == "" {
-		socket = filepath.Join(os.TempDir(), "katyd.sock")
+		socket = "/run/katyd/katyd.sock"
 	}
 	return cli.Dial(socket)
 }
