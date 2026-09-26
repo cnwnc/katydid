@@ -76,7 +76,7 @@ func (b *Bot) OnReady(s *discordgo.Session, _ *discordgo.Ready) {
 		fmt.Fprintf(os.Stderr, "katy-discordd: register commands: %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "katy-discordd: registered %d commands (guild %q)\n", len(cmds), b.guildID)
+	fmt.Fprintf(os.Stderr, "katy-discordd: registered %d commands %s\n", len(cmds), ScopeLabel(b.guildID))
 }
 
 // OnInteraction dispatches slash commands and component clicks.
@@ -484,6 +484,15 @@ func componentMessageID(i *discordgo.InteractionCreate) string {
 		return i.Message.ID
 	}
 	return "@original"
+}
+
+// ScopeLabel names where commands register: one guild (instant) or
+// globally (discord takes up to an hour to propagate).
+func ScopeLabel(guildID string) string {
+	if guildID == "" {
+		return "globally"
+	}
+	return "in guild " + guildID
 }
 
 // clip keeps text within limit characters, marking the cut.

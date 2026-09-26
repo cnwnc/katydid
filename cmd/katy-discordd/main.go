@@ -82,8 +82,8 @@ func run() error {
 		return fmt.Errorf("open gateway: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "katy-discordd: app %s, guild %q, katyd %s, fetchd %s, navidrome %s\n",
-		*appID, *guild, *katydSocket, *fetchdSocket, navdStatus)
+	fmt.Fprintf(os.Stderr, "katy-discordd: app %s, commands %s, katyd %s, fetchd %s, navidrome %s\n",
+		*appID, discord.ScopeLabel(*guild), *katydSocket, *fetchdSocket, navdStatus)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
