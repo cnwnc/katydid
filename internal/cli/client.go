@@ -167,3 +167,15 @@ func (c *Client) Decisions() ([]importer.Decision, error) {
 	}
 	return out.Decisions, c.get("/decisions", &out)
 }
+
+// RecordedResult fetches the outcome recorded for an import request id.
+func (c *Client) RecordedResult(request string) (importer.Result, bool) {
+	var out struct {
+		Found  bool            `json:"found"`
+		Result importer.Result `json:"result"`
+	}
+	if err := c.get("/import/result?request="+url.QueryEscape(request), &out); err != nil {
+		return importer.Result{}, false
+	}
+	return out.Result, out.Found
+}
