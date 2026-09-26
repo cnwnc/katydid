@@ -694,6 +694,7 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile, 
 	mediumOf := mediumPositions(release)
 	tracks := make([]sidecar.Track, 0, len(pairing))
 	copied := make([]stagedFile, 0, len(pairing))
+	titleChanges := []string{}
 	for i, file := range ordered {
 		trackIndex, ok := pairing[i+1]
 		if !ok {
@@ -704,7 +705,12 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile, 
 			return "", nil, err
 		}
 		copied = append(copied, stagedFile{base: file.base, ext: file.ext, tags: file.tags})
-		tracks = append(tracks, trackFromRelease(file, flattened[trackIndex-1], mediumOf[trackIndex-1]))
+		releaseTrack := flattened[trackIndex-1]
+		oldTitle := firstNonEmpty(file.tags.Title, titleFromFilename(file.base))
+		if match.Similarity(oldTitle, releaseTrack.Title) < 1.0 {
+			titleChanges = append(titleChanges, fmt.Sprintf("title: %s -> %s", oldTitle, releaseTrack.Title))
+		}
+		tracks = append(tracks, trackFromRelease(file, releaseTrack, mediumOf[trackIndex-1]))
 	}
 	if len(unpaired) > 0 {
 		names := []string{}
@@ -713,6 +719,7 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile, 
 		}
 		notes = append(notes, fmt.Sprintf("left out %d file(s) not part of the release: %s", len(unpaired), strings.Join(names, ", ")))
 	}
+	notes = append(notes, titleChanges...)
 
 	sc := &sidecar.Album{
 		Album:       albumTitle,

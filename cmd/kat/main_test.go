@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"doppel.moe/katydid/internal/ansi"
+	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
 )
 
@@ -64,5 +66,61 @@ func TestRenderAlbumFormatZeroYearOmits(t *testing.T) {
 	}
 	if got != "Gaza - No Absolutes in Human Suffering" {
 		t.Errorf("zero year: got %q, want no leading space or 0", got)
+	}
+}
+
+func TestStyleNoteBody(t *testing.T) {
+	prev := ansi.Enabled()
+	ansi.SetEnabled(true)
+	defer ansi.SetEnabled(prev)
+
+	cases := []struct{ note, want string }{
+		{"title: First Song -> 最初の歌", "\x1b[2mtitle: \x1b[0mFirst Song\x1b[2m -> \x1b[0m\x1b[32m最初の歌\x1b[0m"},
+		{"left out 1 file(s) not part of the release: 03 - Outtake.flac", "\x1b[33mleft out 1 file(s) not part of the release: 03 - Outtake.flac\x1b[0m"},
+		{"top candidate Test Artist - Test Album rejected: boom", "\x1b[31mtop candidate Test Artist - Test Album rejected: boom\x1b[0m"},
+		{"previous album moved to .trash", "previous album moved to .trash"},
+	}
+	for _, tc := range cases {
+		if got := styleNoteBody(tc.note); got != tc.want {
+			t.Errorf("styleNoteBody(%q): got %q, want %q", tc.note, got, tc.want)
+		}
+	}
+}
+
+func TestStyleNoteBodyPlainWhenDisabled(t *testing.T) {
+	prev := ansi.Enabled()
+	ansi.SetEnabled(false)
+	defer ansi.SetEnabled(prev)
+
+	for _, note := range []string{"title: A -> B", "left out 1 file(s)", "rejected: x", "plain"} {
+		if got := styleNoteBody(note); got != note {
+			t.Errorf("styleNoteBody(%q): got %q, want unchanged", note, got)
+		}
+	}
+}
+
+func TestRemapLine(t *testing.T) {
+	prev := ansi.Enabled()
+	defer ansi.SetEnabled(prev)
+
+	table := &importer.Remap{
+		Files:  []importer.RemapFile{{Index: 1, File: "01 Intro.flac"}, {Index: 2, File: "02 Extra.flac"}},
+		Tracks: []importer.RemapTrack{{Index: 1, Number: "1", Title: "Intro"}},
+		Map:    map[int]int{1: 1},
+	}
+	ansi.SetEnabled(true)
+	paired := "  \x1b[36m01: \"01 Intro.flac\"\x1b[0m\x1b[2m -> \x1b[0m\x1b[32m1 Intro\x1b[0m"
+	unpaired := "  \x1b[36m02: \"02 Extra.flac\"\x1b[0m\x1b[2m (unpaired)\x1b[0m"
+	if got := remapLine(table, table.Files[0]); got != paired {
+		t.Errorf("paired: got %q, want %q", got, paired)
+	}
+	if got := remapLine(table, table.Files[1]); got != unpaired {
+		t.Errorf("unpaired: got %q, want %q", got, unpaired)
+	}
+
+	ansi.SetEnabled(false)
+	plain := "  01: \"01 Intro.flac\" -> 1 Intro"
+	if got := remapLine(table, table.Files[0]); got != plain {
+		t.Errorf("disabled: got %q, want %q", got, plain)
 	}
 }

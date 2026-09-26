@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"doppel.moe/katydid/internal/ansi"
 	"doppel.moe/katydid/internal/cli"
 	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
@@ -258,29 +259,17 @@ func runImport(client *cli.Client, args []string) error {
 }
 
 func handleImportResult(client *cli.Client, result importer.Result, pick int, skip bool) error {
-	switch result.Status {
-	case "imported":
-		if result.Format != "" {
-			fmt.Printf("imported: %s (%s)\n", result.AlbumID, result.Format)
-		} else {
-			fmt.Printf("imported: %s\n", result.AlbumID)
-		}
-		for _, note := range result.Notes {
-			fmt.Printf("note: %s\n", note)
-		}
-		return nil
-	case "skipped":
-		fmt.Println("skipped")
-		return nil
+	if result.Status == "imported" || result.Status == "skipped" {
+		return reportResult(result)
 	}
 
 	decision := result.Decision
 	ev := decision.Evidence
 	for _, note := range result.Notes {
-		fmt.Printf("note: %s\n", note)
+		printNote(note)
 	}
 	fmt.Printf("low confidence for %s - %s (%d files, %d)\n", ev.Artist, ev.Album, ev.TrackCount, ev.Year)
-	fmt.Printf("decision: %s\n", decision.Token)
+	fmt.Printf("%s %s\n", ansi.Dim("decision:"), decision.Token)
 	fmt.Println("candidates:")
 	for _, candidate := range decision.Candidates {
 		parts := []string{}
@@ -293,10 +282,13 @@ func handleImportResult(client *cli.Client, result importer.Result, pick int, sk
 		parts = append(parts, fmt.Sprintf("%d tracks", candidate.TrackCount))
 		marker := " "
 		if candidate.Pairable {
-			marker = "*"
+			marker = ansi.Green("*")
 		}
-		fmt.Printf("  %s%d. [%0.2f] %s - %s (%s)\n",
-			marker, candidate.Number, candidate.Score, candidate.Artist, candidate.Title, strings.Join(parts, ", "))
+		fmt.Printf("  %s%d. %s %s - %s %s\n",
+			marker, candidate.Number,
+			ansi.Dim(fmt.Sprintf("[%0.2f]", candidate.Score)),
+			candidate.Artist, candidate.Title,
+			ansi.Dim("("+strings.Join(parts, ", ")+")"))
 	}
 	if decision.Remap != nil {
 		fmt.Println("(*) would accept these files unchanged")
@@ -375,7 +367,7 @@ func decideInteractive(client *cli.Client, result importer.Result) error {
 }
 
 func promptChoice(count int) (string, error) {
-	fmt.Printf("use which? [1-%d/skip]: ", count)
+	fmt.Print(ansi.Bold(fmt.Sprintf("use which? [1-%d/skip]: ", count)))
 	line := ""
 	if _, err := fmt.Scanln(&line); err != nil {
 		return "", fmt.Errorf("read choice: %w", err)
@@ -384,15 +376,20 @@ func promptChoice(count int) (string, error) {
 }
 
 func printRemapTable(table *importer.Remap) {
-	fmt.Printf("pairing for candidate %d (files 1-%d, tracks 1-%d):\n", table.Pick, len(table.Files), len(table.Tracks))
+	fmt.Println(ansi.Bold(fmt.Sprintf("pairing for candidate %d (files 1-%d, tracks 1-%d):", table.Pick, len(table.Files), len(table.Tracks))))
 	for _, file := range table.Files {
-		if trackIndex, ok := table.Map[file.Index]; ok {
-			track := table.Tracks[trackIndex-1]
-			fmt.Printf("  %02d: %q -> %s %s\n", file.Index, file.File, track.Number, track.Title)
-		} else {
-			fmt.Printf("  %02d: %q\n", file.Index, file.File)
-		}
+		fmt.Println(remapLine(table, file))
 	}
+}
+
+func remapLine(table *importer.Remap, file importer.RemapFile) string {
+	head := "  " + ansi.Cyan(fmt.Sprintf("%02d: %q", file.Index, file.File))
+	trackIndex, ok := table.Map[file.Index]
+	if !ok {
+		return head + ansi.Dim(" (unpaired)")
+	}
+	track := table.Tracks[trackIndex-1]
+	return head + ansi.Dim(" -> ") + ansi.Green(fmt.Sprintf("%s %s", track.Number, track.Title))
 }
 
 const (
@@ -409,7 +406,7 @@ type remapAction struct {
 
 func promptRemap(table *importer.Remap) (remapAction, error) {
 	for {
-		fmt.Printf("file index (done/skip): ")
+		fmt.Print(ansi.Bold("file index (done/skip): "))
 		line := ""
 		if _, err := fmt.Scanln(&line); err != nil {
 			return remapAction{}, fmt.Errorf("read file index: %w", err)
@@ -425,7 +422,7 @@ func promptRemap(table *importer.Remap) (remapAction, error) {
 			fmt.Printf("file index must be 1-%d\n", len(table.Files))
 			continue
 		}
-		fmt.Printf("track index: ")
+		fmt.Print(ansi.Bold("track index: "))
 		trackLine := ""
 		if _, err := fmt.Scanln(&trackLine); err != nil {
 			return remapAction{}, fmt.Errorf("read track index: %w", err)
@@ -441,23 +438,42 @@ func promptRemap(table *importer.Remap) (remapAction, error) {
 
 func printDecisionState(result importer.Result) {
 	for _, note := range result.Notes {
-		fmt.Printf("note: %s\n", note)
+		printNote(note)
 	}
+}
+
+func printNote(note string) {
+	fmt.Printf("%s%s\n", ansi.Dim("note: "), styleNoteBody(note))
+}
+
+func styleNoteBody(note string) string {
+	if rest, ok := strings.CutPrefix(note, "title: "); ok {
+		if oldTitle, newTitle, ok := strings.Cut(rest, " -> "); ok {
+			return ansi.Dim("title: ") + oldTitle + ansi.Dim(" -> ") + ansi.Green(newTitle)
+		}
+	}
+	if strings.Contains(note, "left out") {
+		return ansi.Yellow(note)
+	}
+	if strings.Contains(note, "rejected") {
+		return ansi.Red(note)
+	}
+	return note
 }
 
 func reportResult(result importer.Result) error {
 	switch result.Status {
 	case "imported":
 		if result.Format != "" {
-			fmt.Printf("imported: %s (%s)\n", result.AlbumID, result.Format)
+			fmt.Printf("%s %s (%s)\n", ansi.Green("imported:"), result.AlbumID, result.Format)
 		} else {
-			fmt.Printf("imported: %s\n", result.AlbumID)
+			fmt.Printf("%s %s\n", ansi.Green("imported:"), result.AlbumID)
 		}
 		for _, note := range result.Notes {
-			fmt.Printf("note: %s\n", note)
+			printNote(note)
 		}
 	case "skipped":
-		fmt.Println("skipped")
+		fmt.Println(ansi.Dim("skipped"))
 	}
 	return nil
 }

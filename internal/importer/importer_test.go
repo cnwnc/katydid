@@ -757,6 +757,89 @@ func TestImportRejectsUnmatchedFiles(t *testing.T) {
 	}
 }
 
+func TestImportNotesTitleChanges(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-5", "rg-5", "Test Album", "Test Artist", "2001-10-01", 2)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-5", "rg-5", "Test Album", "Test Artist", "2001-10-01",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "最初の歌"), mbtest.Track(2, "二番目の歌"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := t.TempDir()
+	testaudio.MakeTracked(t, src, "01 - First Song.flac", "First Song", "Test Artist", "Test Album", 1, 1, 2001)
+	testaudio.MakeTracked(t, src, "02 - Second Song.flac", "Second Song", "Test Artist", "Test Album", 2, 1, 2001)
+	testaudio.MakeTracked(t, src, "03 - Outtake.flac", "Outtake", "Test Artist", "Test Album", 3, 1, 2001)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusNeedsDecision {
+		t.Fatalf("status: got %q, want needs_decision (%+v)", result.Status, result)
+	}
+	token := result.Decision.Token
+	parked, err := manager.Decide(context.Background(), token, DecideInput{Pick: 1})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if parked.Status != statusNeedsDecision || parked.Decision == nil || parked.Decision.Remap == nil {
+		t.Fatalf("pick should re-park with a remap table: %+v", parked)
+	}
+	accepted, err := manager.Decide(context.Background(), token, DecideInput{Accept: true})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if accepted.Status != statusImported {
+		t.Fatalf("accept: %+v", accepted)
+	}
+
+	for _, want := range []string{"title: First Song -> 最初の歌", "title: Second Song -> 二番目の歌"} {
+		found := false
+		for _, note := range accepted.Notes {
+			if note == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("notes should carry %q: %+v", want, accepted.Notes)
+		}
+	}
+
+	leftOutIndex := -1
+	titleIndexes := []int{}
+	for i, note := range accepted.Notes {
+		if strings.Contains(note, "left out 1 file(s)") {
+			leftOutIndex = i
+		}
+		if strings.HasPrefix(note, "title: ") {
+			titleIndexes = append(titleIndexes, i)
+		}
+	}
+	if leftOutIndex < 0 {
+		t.Errorf("notes should carry the left out note: %+v", accepted.Notes)
+	}
+	if len(titleIndexes) != 2 {
+		t.Errorf("expected 2 title notes: %+v", accepted.Notes)
+	}
+	for _, i := range titleIndexes {
+		if i < leftOutIndex {
+			t.Errorf("title notes should follow the left out note: %+v", accepted.Notes)
+		}
+	}
+
+	sc, err := sidecar.Load(filepath.Join(root, accepted.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 2 || sc.Tracks[0].Title != "最初の歌" {
+		t.Errorf("published tracks: %+v", sc.Tracks)
+	}
+}
+
 func TestImportRemapPairsMismatchedFiles(t *testing.T) {
 	startMB(t, mbFixture{
 		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-2", "rg-2", "An Awesome Wave", "alt-J", "2012-05-25", 2)},
