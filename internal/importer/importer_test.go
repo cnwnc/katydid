@@ -138,15 +138,16 @@ func TestImportNeedsDecisionPickAndSkip(t *testing.T) {
 	startMB(t, mbFixture{
 		search: []mb.SearchRelease{
 			mbtest.SyntheticSearch("rel-1", "rg-1", "Test Album", "Other Artist", "2001", 5),
-			mbtest.SyntheticSearch("rel-2", "rg-2", "Test Album", "Test Artist", "2019-03-03", 2),
+			mbtest.SyntheticSearch("rel-2", "rg-2", "Test Album", "Test Artist", "2019-03-03", 3),
 		},
 		releases: []mb.Release{
 			mbtest.SyntheticRelease("rel-1", "rg-1", "Test Album", "Other Artist", "2001",
 				mb.ReleaseMedia{Position: 1, TrackCount: 5}),
-			// the right release carries a mismatched year, so auto is refused
+			// the right release carries a mismatched year AND an extra
+			// track, so neither auto nor the perfect-list rule applies
 			mbtest.SyntheticRelease("rel-2", "rg-2", "Test Album", "Test Artist", "2019-03-03",
-				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
-					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 3, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"), mbtest.Track(3, "Third Song"),
 				}}),
 		},
 	})
@@ -1024,4 +1025,29 @@ func manyGroupsBody(count int) string {
 	}
 	data, _ := json.Marshal(map[string]any{"release-groups": groups})
 	return string(data)
+}
+
+func TestImportAutoByPerfectTrackList(t *testing.T) {
+	// the candidate's name matches badly, but every file title matches a
+	// distinct release track and the counts agree: identity
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-x", "rg-x", "Completely Different Name", "Someone Else", "", 2)},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-x", "rg-x", "Completely Different Name", "Someone Else", "",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+				}}),
+		},
+	})
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: src})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: got %q (%+v), want imported by perfect track list", result.Status, result)
+	}
 }

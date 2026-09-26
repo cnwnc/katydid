@@ -174,12 +174,17 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	notes := []string{}
-	if ranked[0].Auto(evidence) {
-		release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID)
-		if err != nil {
-			return nil, err
-		}
-		if coverage := match.Coverage(evidence.TrackTitles, release); coverage >= 0.8 {
+	release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID)
+	if err != nil {
+		return nil, err
+	}
+	coverage := match.Coverage(evidence.TrackTitles, release)
+	// an exact track list is identity: every file title matches a
+	// distinct release track and the counts agree, so name and year
+	// fuzz cannot make it wrong
+	perfect := coverage == 1.0 && len(evidence.TrackTitles) > 0 && len(evidence.TrackTitles) == len(release.FlattenedTracks())
+	if ranked[0].Auto(evidence) || perfect {
+		if coverage >= 0.8 {
 			albumID, importedNotes, err := m.publish(req, release, files, nil, false)
 			if err == nil {
 				m.record(req.Request, Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: importedNotes})
