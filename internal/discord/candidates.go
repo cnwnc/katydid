@@ -48,7 +48,10 @@ func candidateDetail(c Candidate) string {
 	if c.PrimaryType != "" {
 		parts = append(parts, c.PrimaryType)
 	}
-	parts = append(parts, fmt.Sprintf("%d tracks", c.TrackCount))
+	// release group hits carry no track count; only resolved releases do
+	if c.TrackCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d tracks", c.TrackCount))
+	}
 	return truncate(strings.Join(parts, ", "), labelLimit)
 }
 
