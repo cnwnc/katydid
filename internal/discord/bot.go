@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +85,7 @@ func (b *Bot) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 
 func (b *Bot) onCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
+	b.logRequest(i, data.Name)
 	switch data.Name {
 	case "addalbum":
 		b.onAddAlbum(s, i, parseAddSpec(data))
@@ -453,4 +455,39 @@ func ephemeralFlags(ephemeral bool) discordgo.MessageFlags {
 // noMentions keeps user-supplied text from pinging anyone.
 func noMentions() *discordgo.MessageAllowedMentions {
 	return &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}
+}
+
+// logRequest records every interaction request with who asked for what.
+func (b *Bot) logRequest(i *discordgo.InteractionCreate, what string) {
+	user := i.User
+	if user == nil && i.Member != nil {
+		user = i.Member.User
+	}
+	name := "unknown"
+	if user != nil && user.Username != "" {
+		name = user.Username
+	}
+	fmt.Fprintf(os.Stderr, "katy-discordd: %s %s requested by %s (channel %s)\n", what, requestArgs(i), name, i.ChannelID)
+}
+
+// requestArgs summarizes the command arguments for the log line.
+func requestArgs(i *discordgo.InteractionCreate) string {
+	data := i.ApplicationCommandData()
+	parts := []string{}
+	for _, opt := range data.Options {
+		value := ""
+		switch opt.Type {
+		case discordgo.ApplicationCommandOptionInteger:
+			value = fmt.Sprint(opt.IntValue())
+		case discordgo.ApplicationCommandOptionBoolean:
+			value = fmt.Sprint(opt.BoolValue())
+		default:
+			value = opt.StringValue()
+		}
+		parts = append(parts, fmt.Sprintf("%s=%q", opt.Name, value))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(parts, " ") + ")"
 }
