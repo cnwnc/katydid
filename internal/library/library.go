@@ -22,6 +22,7 @@ type Meta struct {
 	AlbumArtist string      `json:"albumartist"`
 	Album       string      `json:"album"`
 	Year        int         `json:"year,omitempty"`
+	ReleaseID   string      `json:"release_id,omitempty"`
 	By          string      `json:"by,omitempty"`
 	Request     string      `json:"request,omitempty"`
 	Tracks      []TrackMeta `json:"tracks"`

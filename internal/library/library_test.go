@@ -127,6 +127,9 @@ func TestQuery(t *testing.T) {
 	if got := ix.Albums(Query{Q: "this we celebrate"}); len(got) != 1 || got[0].Meta.Album != "No Absolutes in Human Suffering" {
 		t.Errorf("query by sidecar track title: got %+v", got)
 	}
+	if got := ix.Albums(Query{Artist: "gaza"}); len(got) != 1 || got[0].Meta.ReleaseID != "gaza-release" {
+		t.Errorf("release id should surface from the sidecar: %+v", got)
+	}
 	if got := ix.Albums(Query{Artist: "gaza"}); len(got) != 1 || got[0].Meta.AlbumArtist != "Gaza" {
 		t.Errorf("query by artist: got %+v", got)
 	}

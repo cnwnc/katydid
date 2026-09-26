@@ -30,7 +30,7 @@ type Config struct {
 // Navidrome refreshes the music server after imports and mints
 // share links; a nil Navidrome disables the feature.
 type Navidrome interface {
-	RefreshAndShare(ctx context.Context, artist, album string) (string, error)
+	RefreshAndShare(ctx context.Context, artist, album, releaseID string) (string, error)
 }
 
 type Bot struct {
@@ -344,7 +344,8 @@ func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID stri
 func (b *Bot) shareInto(s *discordgo.Session, token string, w Want, expires time.Time) {
 	ctx, cancel := context.WithDeadline(b.root, minTime(time.Now().Add(shareBudget), expires))
 	defer cancel()
-	url, err := b.navidrome.RefreshAndShare(ctx, w.Artist, w.Album)
+	artist, album, releaseID := importedIdentity(b.katyd, w)
+	url, err := b.navidrome.RefreshAndShare(ctx, artist, album, releaseID)
 	result := "Navidrome: " + url
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "katy-discordd: navidrome share %s: %v\n", w.ID, err)
@@ -353,6 +354,33 @@ func (b *Bot) shareInto(s *discordgo.Session, token string, w Want, expires time
 	if err := b.updateWebhook(s, token, "@original", statusLine(w)+"\n"+result); err != nil {
 		fmt.Fprintf(os.Stderr, "katy-discordd: share edit %s: %v\n", w.ID, err)
 	}
+}
+
+// albumLookup is the katyd call importedIdentity needs.
+type albumLookup interface {
+	Album(id string) (Album, error)
+}
+
+// importedIdentity names the album as imported: the want carries the
+// user's typed specifier (typos and all), the library carries what
+// musicbrainz resolved. The typed names are only a fallback.
+func importedIdentity(k albumLookup, w Want) (artist, album, releaseID string) {
+	artist, album = w.Artist, w.Album
+	if w.AlbumID == "" {
+		return artist, album, ""
+	}
+	imported, err := k.Album(w.AlbumID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "katy-discordd: lookup imported album %s: %v\n", w.AlbumID, err)
+		return artist, album, ""
+	}
+	if imported.Meta.AlbumArtist != "" {
+		artist = imported.Meta.AlbumArtist
+	}
+	if imported.Meta.Album != "" {
+		album = imported.Meta.Album
+	}
+	return artist, album, imported.Meta.ReleaseID
 }
 
 func minTime(a, b time.Time) time.Time {

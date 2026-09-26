@@ -43,9 +43,19 @@ func startNavidrome(t *testing.T, scanning, denyScan *atomic.Bool, expectPatch b
 	})
 	mux.HandleFunc("/rest/search3", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"subsonic-response":{"status":"ok","searchResult3":{"album":[`+
-			`{"id":"alb-wrong","name":"Other Album","artist":"Someone"},`+
-			`{"id":"alb-ok","name":"Test Album","artist":"Test Artist"}]}}}`)
+		// navidrome matches the query against names and musicbrainz ids
+		query := strings.ToLower(r.URL.Query().Get("query"))
+		all := []string{
+			`{"id":"alb-wrong","name":"Other Album","artist":"Someone","musicBrainzId":"rel-other"}`,
+			`{"id":"alb-ok","name":"Test Album","artist":"Test Artist","musicBrainzId":"rel-test"}`,
+		}
+		hits := []string{}
+		for _, album := range all {
+			if strings.Contains(strings.ToLower(album), query) {
+				hits = append(hits, album)
+			}
+		}
+		fmt.Fprint(w, `{"subsonic-response":{"status":"ok","searchResult3":{"album":[`+strings.Join(hits, ",")+`]}}}`)
 	})
 	mux.HandleFunc("/rest/createShare", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -97,7 +107,7 @@ func TestRefreshAndShare(t *testing.T) {
 	var scanning, denyScan atomic.Bool
 	client := startNavidrome(t, &scanning, &denyScan, true)
 
-	url, err := client.RefreshAndShare(context.Background(), "Test Artist", "Test Album")
+	url, err := client.RefreshAndShare(context.Background(), "Test Artist", "Test Album", "")
 	if err != nil {
 		t.Fatalf("RefreshAndShare: %v", err)
 	}
@@ -113,7 +123,7 @@ func TestRefreshScanDeniedProceedsWhenIdle(t *testing.T) {
 
 	// no scan rights and nothing scanning: refresh must not block, the
 	// share still goes through on the library as it stands
-	url, err := client.RefreshAndShare(context.Background(), "Test Artist", "Test Album")
+	url, err := client.RefreshAndShare(context.Background(), "Test Artist", "Test Album", "")
 	if err != nil {
 		t.Fatalf("RefreshAndShare with denied scan: %v", err)
 	}
@@ -129,8 +139,22 @@ func TestRefreshWaitsForForeignScan(t *testing.T) {
 	client := startNavidrome(t, &scanning, &denyScan, true)
 
 	// someone else's scan is running: refresh waits for it to end
-	if _, err := client.RefreshAndShare(context.Background(), "Test Artist", "Test Album"); err != nil {
+	if _, err := client.RefreshAndShare(context.Background(), "Test Artist", "Test Album", ""); err != nil {
 		t.Fatalf("RefreshAndShare during foreign scan: %v", err)
+	}
+}
+
+func TestFindAlbumByReleaseID(t *testing.T) {
+	var scanning, denyScan atomic.Bool
+	client := startNavidrome(t, &scanning, &denyScan, true)
+
+	// misspelled names still find the album through its release id
+	url, err := client.RefreshAndShare(context.Background(), "Tset Artsit", "Tset Albmu", "rel-test")
+	if err != nil {
+		t.Fatalf("RefreshAndShare by release id: %v", err)
+	}
+	if !strings.HasSuffix(url, "/share/sh1") {
+		t.Errorf("share url: %q", url)
 	}
 }
 
@@ -139,7 +163,7 @@ func TestFindAlbumFailsLoud(t *testing.T) {
 	denyScan.Store(true)
 	client := startNavidrome(t, &scanning, &denyScan, false)
 
-	if _, err := client.RefreshAndShare(context.Background(), "Other Artist", "Other Album"); err == nil {
+	if _, err := client.RefreshAndShare(context.Background(), "Other Artist", "Other Album", "rel-missing"); err == nil {
 		t.Fatalf("missing album should fail loud")
 	}
 }

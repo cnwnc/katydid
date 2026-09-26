@@ -59,6 +59,15 @@ func (k *Katyd) Resolve(q Query) ([]Candidate, bool, error) {
 	return out.Candidates, out.Auto, nil
 }
 
+// Album looks up an imported album in the katyd library by id.
+func (k *Katyd) Album(id string) (Album, error) {
+	var out Album
+	if err := request(k.hc, http.MethodGet, "/album?id="+url.QueryEscape(id), nil, &out); err != nil {
+		return Album{}, fmt.Errorf("katyd album %s: %w", id, err)
+	}
+	return out, nil
+}
+
 // Add queues a want on fetchd.
 func (f *Fetchd) Add(a AddWant) (Want, error) {
 	var out wantResponse

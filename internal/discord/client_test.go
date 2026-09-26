@@ -2,6 +2,7 @@ package discord
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -168,6 +169,50 @@ func TestFetchdWantNotFound(t *testing.T) {
 	f := NewFetchd(socket)
 	if _, err := f.Want("nope"); err == nil || !strings.Contains(err.Error(), "no want with id nope") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestKatydAlbum(t *testing.T) {
+	socket := serveOnSocket(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/album" || r.URL.Query().Get("id") != "Operation Sodasteal/2022 - SLANEY" {
+			http.Error(w, `{"error":"no album"}`, http.StatusNotFound)
+			return
+		}
+		io.WriteString(w, `{"id":"x","meta":{"albumartist":"Operation Sodasteal","album":"SLANEY VS. SODASTEAL","release_id":"rel-1"}}`)
+	})
+	k := NewKatyd(socket)
+	album, err := k.Album("Operation Sodasteal/2022 - SLANEY")
+	if err != nil {
+		t.Fatalf("album: %v", err)
+	}
+	if album.Meta.AlbumArtist != "Operation Sodasteal" || album.Meta.Album != "SLANEY VS. SODASTEAL" || album.Meta.ReleaseID != "rel-1" {
+		t.Fatalf("album = %+v", album)
+	}
+	if _, err := k.Album("missing"); err == nil {
+		t.Fatalf("missing album should fail")
+	}
+}
+
+type fakeAlbums struct {
+	album Album
+	err   error
+}
+
+func (f fakeAlbums) Album(string) (Album, error) { return f.album, f.err }
+
+func TestImportedIdentityPrefersLibrary(t *testing.T) {
+	var imported Album
+	imported.Meta.AlbumArtist, imported.Meta.Album, imported.Meta.ReleaseID = "Operation Sodasteal", "SLANEY VS. SODASTEAL", "rel-1"
+	typed := Want{Artist: "operation sodastel", Album: "slaney vs sodastel", AlbumID: "dir"}
+
+	artist, album, releaseID := importedIdentity(fakeAlbums{album: imported}, typed)
+	if artist != "Operation Sodasteal" || album != "SLANEY VS. SODASTEAL" || releaseID != "rel-1" {
+		t.Fatalf("identity = %q %q %q", artist, album, releaseID)
+	}
+
+	artist, album, releaseID = importedIdentity(fakeAlbums{err: errors.New("down")}, typed)
+	if artist != typed.Artist || album != typed.Album || releaseID != "" {
+		t.Fatalf("lookup failure should fall back to typed names: %q %q %q", artist, album, releaseID)
 	}
 }
 

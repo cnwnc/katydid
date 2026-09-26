@@ -38,6 +38,17 @@ type wantsResponse struct {
 	Wants []Want `json:"wants"`
 }
 
+// Album is the slice of a katyd library album the bot needs: the names
+// and release id musicbrainz gave it, not what the user typed.
+type Album struct {
+	ID   string `json:"id"`
+	Meta struct {
+		AlbumArtist string `json:"albumartist"`
+		Album       string `json:"album"`
+		ReleaseID   string `json:"release_id"`
+	} `json:"meta"`
+}
+
 // Query is the katyd /resolve specifier.
 type Query struct {
 	Artist string

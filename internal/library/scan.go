@@ -134,7 +134,7 @@ func sidecarMeta(sc *sidecar.Album) Meta {
 			LengthSeconds: track.LengthSeconds,
 		})
 	}
-	return Meta{AlbumArtist: sc.AlbumArtist, Album: sc.Album, Year: sc.Year, By: sc.Provenance.By, Request: sc.Provenance.Request, Tracks: tracks}
+	return Meta{AlbumArtist: sc.AlbumArtist, Album: sc.Album, Year: sc.Year, ReleaseID: sc.MusicBrainz.ReleaseID, By: sc.Provenance.By, Request: sc.Provenance.Request, Tracks: tracks}
 }
 
 type fileMeta struct {

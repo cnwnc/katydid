@@ -76,13 +76,14 @@ func BaseURL(base, port string) (string, error) {
 	return parsed.String(), nil
 }
 
-// RefreshAndShare scans the library, finds the album, creates a share
-// for it with downloads enabled, and returns the public share URL.
-func (c *Client) RefreshAndShare(ctx context.Context, artist, album string) (string, error) {
+// RefreshAndShare scans the library, finds the album (by musicbrainz
+// release id when known, else by name), creates a share for it with
+// downloads enabled, and returns the public share URL.
+func (c *Client) RefreshAndShare(ctx context.Context, artist, album, releaseID string) (string, error) {
 	if err := c.refresh(ctx); err != nil {
 		return "", err
 	}
-	albumID, err := c.findAlbum(ctx, artist, album)
+	albumID, err := c.findAlbum(ctx, artist, album, releaseID)
 	if err != nil {
 		return "", err
 	}
@@ -180,31 +181,61 @@ func (c *Client) awaitScan(ctx context.Context) error {
 	}
 }
 
-func (c *Client) findAlbum(ctx context.Context, artist, album string) (string, error) {
-	params := url.Values{}
-	params.Set("query", album)
-	params.Set("albumCount", "20")
-	var out struct {
-		SubsonicResponse struct {
-			SearchResult3 struct {
-				Albums []struct {
-					ID     string `json:"id"`
-					Name   string `json:"name"`
-					Artist string `json:"artist"`
-				} `json:"album"`
-			} `json:"searchResult3"`
-		} `json:"subsonic-response"`
+type searchAlbum struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Artist        string `json:"artist"`
+	MusicBrainzID string `json:"musicBrainzId"`
+}
+
+// findAlbum locates the imported album. The release id is exact (every
+// katydid import is tagged with it); names are the fallback for albums
+// navidrome indexed without one.
+func (c *Client) findAlbum(ctx context.Context, artist, album, releaseID string) (string, error) {
+	if releaseID != "" {
+		hits, err := c.searchAlbums(ctx, releaseID)
+		if err != nil {
+			return "", err
+		}
+		for _, a := range hits {
+			if strings.EqualFold(a.MusicBrainzID, releaseID) {
+				return a.ID, nil
+			}
+		}
 	}
-	if err := c.subsonic(ctx, "search3", params, &out); err != nil {
+	hits, err := c.searchAlbums(ctx, album)
+	if err != nil {
 		return "", err
 	}
 	wantAlbum, wantArtist := loose(album), loose(artist)
-	for _, a := range out.SubsonicResponse.SearchResult3.Albums {
+	for _, a := range hits {
 		if loose(a.Name) == wantAlbum && loose(a.Artist) == wantArtist {
 			return a.ID, nil
 		}
 	}
+	if releaseID != "" {
+		return "", fmt.Errorf("album %q by %q (release %s) not found in navidrome", album, artist, releaseID)
+	}
 	return "", fmt.Errorf("album %q by %q not found in navidrome", album, artist)
+}
+
+func (c *Client) searchAlbums(ctx context.Context, query string) ([]searchAlbum, error) {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("albumCount", "20")
+	params.Set("artistCount", "0")
+	params.Set("songCount", "0")
+	var out struct {
+		SubsonicResponse struct {
+			SearchResult3 struct {
+				Albums []searchAlbum `json:"album"`
+			} `json:"searchResult3"`
+		} `json:"subsonic-response"`
+	}
+	if err := c.subsonic(ctx, "search3", params, &out); err != nil {
+		return nil, err
+	}
+	return out.SubsonicResponse.SearchResult3.Albums, nil
 }
 
 type share struct {
