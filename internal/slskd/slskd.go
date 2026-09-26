@@ -116,7 +116,7 @@ type Transfer struct {
 	Removed          bool    `json:"removed"`
 	BytesRemaining   int64   `json:"bytesRemaining"`
 	PercentComplete  float64 `json:"percentComplete"`
-	RemainingTime    *int64  `json:"remainingTime"`
+	RemainingTime    *Duration `json:"remainingTime"`
 }
 
 func (c *Client) CreateSearch(ctx context.Context, req SearchRequest) (*Search, error) {

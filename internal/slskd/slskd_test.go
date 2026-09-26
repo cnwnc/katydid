@@ -3,6 +3,7 @@ package slskd_test
 import (
 	"context"
 	"encoding/json"
+	"time"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -183,5 +184,22 @@ func TestDecodeNaiveTimestamps(t *testing.T) {
 	}
 	if out[0].RequestedAt.IsZero() {
 		t.Fatalf("requestedAt should decode")
+	}
+}
+
+func TestDecodeTransferDurationShapes(t *testing.T) {
+	payload := []byte(`[{"id":"t1","remainingTime":"00:00:00","requestedAt":"2026-06-25T01:41:01.7305916","state":"Completed, Succeeded"},{"id":"t2","remainingTime":"01:02:03.5","state":"InProgress"},{"id":"t3","remainingTime":null}]`)
+	var out []slskd.Transfer
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("decode transfers: %v", err)
+	}
+	if out[0].RemainingTime == nil || out[0].RemainingTime.Duration != 0 {
+		t.Errorf("zero timespan: %+v", out[0].RemainingTime)
+	}
+	if out[1].RemainingTime == nil || out[1].RemainingTime.Duration != time.Hour+2*time.Minute+3*time.Second+500*time.Millisecond {
+		t.Errorf("fractional timespan: %+v", out[1].RemainingTime)
+	}
+	if out[2].RemainingTime != nil {
+		t.Errorf("null should stay nil: %+v", out[2].RemainingTime)
 	}
 }
