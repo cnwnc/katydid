@@ -148,8 +148,9 @@ func TestBaseURL(t *testing.T) {
 	cases := []struct {
 		base, port, want string
 	}{
-		{"", "", "http://localhost:4533"},
-		{"", "4600", "http://localhost:4600"},
+		{"", "", "http://127.0.0.1:4533"},
+		{"", "4600", "http://127.0.0.1:4600"},
+		{"http://localhost", "", "http://localhost:4533"},
 		{"http://10.100.0.2", "", "http://10.100.0.2:4533"},
 		{"http://10.100.0.2:1234", "", "http://10.100.0.2:1234"},
 		{"http://10.100.0.2", "80", "http://10.100.0.2:80"},

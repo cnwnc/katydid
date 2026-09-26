@@ -50,12 +50,13 @@ func New(base, username, password string) *Client {
 	}
 }
 
-// BaseURL resolves the server address: the default is http://localhost,
-// base overrides scheme and host, port overrides the port. A base that
-// already carries a port wins unless port is also given.
+// BaseURL resolves the server address: the default is http://127.0.0.1
+// (not localhost, which may resolve to ::1 first), base overrides scheme
+// and host, port overrides the port. A base that already carries a port
+// wins unless port is also given.
 func BaseURL(base, port string) (string, error) {
 	if base == "" {
-		base = "http://localhost"
+		base = "http://127.0.0.1"
 	}
 	parsed, err := url.Parse(strings.TrimRight(base, "/"))
 	if err != nil {
