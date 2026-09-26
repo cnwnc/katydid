@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -9,12 +10,16 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+
+	"doppel.moe/katydid/internal/lastfm"
 )
 
 const (
 	pollInterval = 5 * time.Second
 	pollBudget   = 14 * time.Minute
 	shareBudget  = 5 * time.Minute
+	// last.fm rescue runs while the interaction is still alive; keep it short
+	lastfmBudget = 20 * time.Second
 	// discord rejects message content past this many characters
 	messageLimit = 2000
 	// tracked maps are capped with a blunt reset; entries are tiny and
@@ -33,10 +38,18 @@ type Navidrome interface {
 	RefreshAndShare(ctx context.Context, artist, album, releaseID string) (string, error)
 }
 
+// LastFM finds albums musicbrainz lacks; a nil LastFM disables the
+// fallback and unmatched artists fail as before.
+type LastFM interface {
+	GetInfo(ctx context.Context, artist, album string) (lastfm.Album, error)
+	Search(ctx context.Context, artist, album string) ([]lastfm.Album, error)
+}
+
 type Bot struct {
 	katyd     *Katyd
 	fetchd    *Fetchd
 	navidrome Navidrome
+	lastfm    LastFM
 	appID     string
 	guildID   string
 	cmds      []*discordgo.ApplicationCommand
@@ -49,12 +62,13 @@ type Bot struct {
 	cancel    context.CancelFunc
 }
 
-func NewBot(katyd *Katyd, fetchd *Fetchd, navidrome Navidrome, cfg Config) *Bot {
+func NewBot(katyd *Katyd, fetchd *Fetchd, navidrome Navidrome, lastfm LastFM, cfg Config) *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Bot{
 		katyd:     katyd,
 		fetchd:    fetchd,
 		navidrome: navidrome,
+		lastfm:    lastfm,
 		appID:     cfg.AppID,
 		guildID:   cfg.GuildID,
 		cmds:      commands(),
@@ -133,12 +147,73 @@ func (b *Bot) onAddAlbum(s *discordgo.Session, i *discordgo.InteractionCreate, s
 	spec.Candidates = candidates
 	switch {
 	case len(candidates) == 0:
-		b.editOriginal(s, i.Interaction, fmt.Sprintf("No matches for %s - %s.", spec.Artist, spec.Album))
+		if b.lastfm == nil {
+			b.editOriginal(s, i.Interaction, fmt.Sprintf("No matches for %s - %s.", spec.Artist, spec.Album))
+			return
+		}
+		b.lastFMRescue(s, i, spec)
+		return
 	case len(candidates) == 1:
 		b.followSingle(s, i, spec, candidates[0], auto)
 	default:
 		b.followMenu(s, i, spec, candidates, defaultMenuSize)
 	}
+}
+
+// lastFMRescue falls back to last.fm when musicbrainz has no candidates.
+// A last.fm album carrying an mbid still goes through the vetted musicbrainz
+// flow; otherwise the user confirms an unvetted import with last.fm metadata.
+func (b *Bot) lastFMRescue(s *discordgo.Session, i *discordgo.InteractionCreate, spec addSpec) {
+	ctx, cancel := context.WithTimeout(b.root, lastfmBudget)
+	defer cancel()
+	al, err := b.lastfm.GetInfo(ctx, spec.Artist, spec.Album)
+	if errors.Is(err, lastfm.ErrNotFound) {
+		hits, serr := b.lastfm.Search(ctx, spec.Artist, spec.Album)
+		if serr == nil && len(hits) > 0 {
+			al, err = b.lastfm.GetInfo(ctx, hits[0].Artist, hits[0].Name)
+		}
+	}
+	switch {
+	case err == nil:
+	case errors.Is(err, lastfm.ErrNotFound):
+		b.editOriginal(s, i.Interaction, fmt.Sprintf("not on musicbrainz or last.fm: %s - %s", spec.Artist, spec.Album))
+		return
+	default:
+		b.editOriginal(s, i.Interaction, fmt.Sprintf("last.fm lookup failed: %s - %s: %v", spec.Artist, spec.Album, err))
+		return
+	}
+	if al.MBID != "" {
+		spec.MBID = al.MBID
+		candidates, auto, rerr := b.katyd.Resolve(Query{MBID: al.MBID, Limit: defaultMenuSize})
+		if rerr != nil {
+			b.editOriginal(s, i.Interaction, fmt.Sprintf("last.fm points at musicbrainz %s but katyd cannot resolve it: %v", al.MBID, rerr))
+			return
+		}
+		if len(candidates) == 0 {
+			b.editOriginal(s, i.Interaction, fmt.Sprintf("last.fm points at musicbrainz %s but katyd finds no release there", al.MBID))
+			return
+		}
+		spec.Candidates = candidates
+		b.followSingle(s, i, spec, candidates[0], auto)
+		return
+	}
+	msg, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content:         lastFMText(spec, al),
+		Flags:           ephemeralFlags(spec.Ephemeral),
+		AllowedMentions: noMentions(),
+		Components: []discordgo.MessageComponent{
+			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: lastFMAddLabel, Style: discordgo.DangerButton, CustomID: customLastFM},
+				discordgo.Button{Label: cancelButtonLabel, Style: discordgo.SecondaryButton, CustomID: customCancel},
+			}},
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "katy-discordd: lastfm followup: %v\n", err)
+		return
+	}
+	spec.LastFM = &al
+	b.trackPending(msg.ID, spec)
 }
 
 // followSingle offers add/cancel buttons for the one candidate.
@@ -231,6 +306,8 @@ func (b *Bot) onComponent(s *discordgo.Session, i *discordgo.InteractionCreate) 
 			return
 		}
 		b.onPick(s, i, act.value)
+	case actionLastFMAdd:
+		b.onLastFMAdd(s, i)
 	default:
 		fmt.Fprintf(os.Stderr, "katy-discordd: unknown component %q\n", data.CustomID)
 	}
@@ -294,6 +371,39 @@ func (b *Bot) onPick(s *discordgo.Session, i *discordgo.InteractionCreate, relea
 		b.updateWebhook(s, i.Interaction.Token, componentMessageID(i), err.Error())
 		return
 	}
+	b.updateWebhook(s, i.Interaction.Token, componentMessageID(i), statusLine(want))
+	b.startPoll(s, i.Interaction.Token, want)
+}
+
+// onLastFMAdd queues the unvetted import confirmed on a last.fm prompt.
+func (b *Bot) onLastFMAdd(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	spec, ok := b.pendingFor(i.Message.ID)
+	if !ok || spec.LastFM == nil {
+		b.updateMessage(s, i, "This prompt expired — run /addalbum again.", nil)
+		return
+	}
+	if b.consume(i.Message.ID) {
+		b.updateMessage(s, i, "Already handled.", nil)
+		return
+	}
+	titles := make([]string, 0, len(spec.LastFM.Tracks))
+	for _, t := range spec.LastFM.Tracks {
+		titles = append(titles, t.Name)
+	}
+	want, err := b.fetchd.Add(AddWant{
+		Artist:        spec.Artist,
+		Album:         spec.Album,
+		Source:        "lastfm",
+		SourceURL:     spec.LastFM.URL,
+		ReleaseArtist: spec.LastFM.Artist,
+		ReleaseTitle:  spec.LastFM.Name,
+		TrackTitles:   titles,
+	})
+	if err != nil {
+		b.updateMessage(s, i, err.Error(), nil)
+		return
+	}
+	b.updateMessage(s, i, fmt.Sprintf("Queued %s - %s (last.fm metadata): searching soulseek…", spec.LastFM.Artist, spec.LastFM.Name), nil)
 	b.updateWebhook(s, i.Interaction.Token, componentMessageID(i), statusLine(want))
 	b.startPoll(s, i.Interaction.Token, want)
 }

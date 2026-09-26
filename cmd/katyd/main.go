@@ -91,7 +91,7 @@ func newImporter(index *library.Index) *importer.Manager {
 		}
 	}
 	noCache := os.Getenv("KATYDID_MB_NOCACHE") != ""
-	return importer.New(index, mb.New(mbBase, cacheDir, noCache))
+	return importer.New(index, mb.New(mbBase, cacheDir, noCache), nil)
 }
 
 func listen(socket string) (net.Listener, error) {

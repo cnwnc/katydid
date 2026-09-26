@@ -132,6 +132,28 @@ func TestFetchdAddSendsMBID(t *testing.T) {
 	}
 }
 
+func TestFetchdAddSendsLastFM(t *testing.T) {
+	socket := serveOnSocket(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/wants" {
+			t.Errorf("method/path = %s %q", r.Method, r.URL.Path)
+		}
+		var body AddWant
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if body.Source != "lastfm" || body.SourceURL != "u" || body.ReleaseArtist != "R" || body.ReleaseTitle != "T" || len(body.TrackTitles) != 2 || body.TrackTitles[0] != "a" || body.TrackTitles[1] != "b" {
+			t.Errorf("body = %+v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, `{"want":{"id":"x","state":"queued"}}`)
+	})
+	f := NewFetchd(socket)
+	add := AddWant{Artist: "a", Album: "b", Source: "lastfm", SourceURL: "u", ReleaseArtist: "R", ReleaseTitle: "T", TrackTitles: []string{"a", "b"}}
+	if _, err := f.Add(add); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+}
+
 func TestFetchdWantAndWants(t *testing.T) {
 	socket := serveOnSocket(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"doppel.moe/katydid/internal/lastfm"
 	"doppel.moe/katydid/internal/library"
 	"doppel.moe/katydid/internal/mb"
 	"doppel.moe/katydid/internal/mb/mbtest"
@@ -63,7 +65,7 @@ func newManager(t *testing.T, root string) *Manager {
 	t.Helper()
 	client := mb.New(mbBase, "", false)
 	client.SetRequestInterval(time.Millisecond)
-	return New(library.NewIndex(root), client)
+	return New(library.NewIndex(root), client, nil)
 }
 
 func twoTestFiles(t *testing.T) string {
@@ -1220,5 +1222,140 @@ func TestImportAutoByPerfectTrackList(t *testing.T) {
 	}
 	if result.Status != statusImported {
 		t.Fatalf("status: got %q (%+v), want imported by perfect track list", result.Status, result)
+	}
+}
+
+const lastfmFixtureBody = `{"album": {"artist": "The Brown", "mbid": "", "name": "MelloW",
+	"url": "https://www.last.fm/music/The+Brown/MelloW",
+	"tracks": {"track": [
+		{"name": "Aside", "duration": "213", "@attr": {"rank": "1"}},
+		{"name": "Bside", "duration": "", "@attr": {"rank": "2"}},
+		{"name": "Cside", "duration": "null", "@attr": {"rank": "3"}}
+	]}}}`
+
+func startLastFM(t *testing.T, body string) *lastfm.Client {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	client := lastfm.New("test-key")
+	client.SetBase(server.URL)
+	return client
+}
+
+func newManagerWithLastFM(t *testing.T, root string, lastfmClient *lastfm.Client) *Manager {
+	t.Helper()
+	client := mb.New(mbBase, "", false)
+	client.SetRequestInterval(time.Millisecond)
+	return New(library.NewIndex(root), client, lastfmClient)
+}
+
+func threeLastFMFiles(t *testing.T) string {
+	t.Helper()
+	src := t.TempDir()
+	testaudio.MakeTracked(t, src, "01 - a.flac", "a", "The Brown", "MelloW", 1, 1, 2001)
+	testaudio.MakeTracked(t, src, "02 - b.flac", "b", "The Brown", "MelloW", 2, 1, 2001)
+	testaudio.MakeTracked(t, src, "03 - c.flac", "c", "The Brown", "MelloW", 3, 1, 2001)
+	return src
+}
+
+func TestImportLastFM(t *testing.T) {
+	startMB(t, mbFixture{})
+	root := t.TempDir()
+	src := threeLastFMFiles(t)
+	manager := newManagerWithLastFM(t, root, startLastFM(t, lastfmFixtureBody))
+
+	result, err := manager.Import(context.Background(), Request{Dir: src, Source: "lastfm", Artist: "The Brown", Album: "MelloW", By: "test", Request: "req-1"})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: got %q, want imported (%+v)", result.Status, result)
+	}
+	if !strings.HasSuffix(result.AlbumID, " [last.fm]") {
+		t.Errorf("album id should carry the last.fm marker: %q", result.AlbumID)
+	}
+	sc, err := sidecar.Load(filepath.Join(root, result.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if sc.Source != "lastfm" {
+		t.Errorf("sidecar source: got %q, want lastfm", sc.Source)
+	}
+	if sc.LastFM.URL != "https://www.last.fm/music/The+Brown/MelloW" {
+		t.Errorf("sidecar last.fm url: %q", sc.LastFM.URL)
+	}
+	if sc.MusicBrainz.ReleaseID != "" || sc.MusicBrainz.ReleaseGroupID != "" {
+		t.Errorf("sidecar should have no musicbrainz ids: %+v", sc.MusicBrainz)
+	}
+	vetted := false
+	for _, note := range result.Notes {
+		if strings.Contains(note, "not musicbrainz-vetted") {
+			vetted = true
+		}
+	}
+	if !vetted {
+		t.Errorf("notes should flag the last.fm provenance: %+v", result.Notes)
+	}
+	wantTitles := []string{"Aside", "Bside", "Cside"}
+	if len(sc.Tracks) != len(wantTitles) {
+		t.Fatalf("published %d tracks, want %d", len(sc.Tracks), len(wantTitles))
+	}
+	for i, want := range wantTitles {
+		if sc.Tracks[i].Title != want {
+			t.Errorf("track %d title: got %q, want last.fm name %q", i, sc.Tracks[i].Title, want)
+		}
+	}
+
+	raw, err := taglib.ReadTags(filepath.Join(root, result.AlbumID, sc.Tracks[0].File))
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if got := raw["COMMENT"]; len(got) != 1 || got[0] != "metadata from last.fm; not musicbrainz-vetted" {
+		t.Errorf("comment tag: %v", got)
+	}
+
+	if recorded, ok := manager.RecordedResult("req-1"); !ok || recorded.Status != statusImported || recorded.AlbumID != result.AlbumID {
+		t.Errorf("recorded result: %+v ok %v", recorded, ok)
+	}
+}
+
+func TestImportLastFMRequiresNames(t *testing.T) {
+	startMB(t, mbFixture{})
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+
+	if _, err := manager.Import(context.Background(), Request{Dir: src, Source: "lastfm"}); err == nil || !strings.Contains(err.Error(), "needs artist and album") {
+		t.Fatalf("err: got %v, want last.fm import needs artist and album", err)
+	}
+	if _, err := manager.Import(context.Background(), Request{Dir: src, Source: "discogs"}); err == nil || !strings.Contains(err.Error(), "unknown import source") {
+		t.Fatalf("err: got %v, want unknown import source", err)
+	}
+}
+
+func TestImportLastFMNotConfigured(t *testing.T) {
+	startMB(t, mbFixture{})
+	root := t.TempDir()
+	src := twoTestFiles(t)
+	manager := newManager(t, root)
+
+	_, err := manager.Import(context.Background(), Request{Dir: src, Source: "lastfm", Artist: "The Brown", Album: "MelloW"})
+	if err == nil || !strings.Contains(err.Error(), "last.fm is not configured") {
+		t.Fatalf("err: got %v, want last.fm is not configured", err)
+	}
+}
+
+func TestImportLastFMNotFound(t *testing.T) {
+	startMB(t, mbFixture{})
+	root := t.TempDir()
+	src := threeLastFMFiles(t)
+	manager := newManagerWithLastFM(t, root, startLastFM(t, `{"error": 6, "message": "The artist you supplied could not be found", "links": []}`))
+
+	_, err := manager.Import(context.Background(), Request{Dir: src, Source: "lastfm", Artist: "The Brown", Album: "MelloW"})
+	if err == nil || (!errors.Is(err, lastfm.ErrNotFound) && !strings.Contains(err.Error(), "no last.fm album")) {
+		t.Fatalf("err: got %v, want no last.fm album", err)
 	}
 }

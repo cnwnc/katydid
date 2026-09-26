@@ -56,13 +56,17 @@ type Want struct {
 	// ReleaseArtist and ReleaseTitle are the musicbrainz names once
 	// resolved; Artist and Album stay as typed, since soulseek folders
 	// often match the typed (romanized) spelling better
-	ReleaseArtist string    `json:"release_artist,omitempty"`
-	ReleaseTitle  string    `json:"release_title,omitempty"`
-	ReleaseID     string    `json:"release_id,omitempty"`
-	State         string    `json:"state"`
-	Error         string    `json:"error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ReleaseArtist string `json:"release_artist,omitempty"`
+	ReleaseTitle  string `json:"release_title,omitempty"`
+	ReleaseID     string `json:"release_id,omitempty"`
+	// Source and SourceURL mark non-musicbrainz imports: source is
+	// "lastfm" and everything downstream marks the artifacts unvetted
+	Source    string    `json:"source,omitempty"`
+	SourceURL string    `json:"source_url,omitempty"`
+	State     string    `json:"state"`
+	Error     string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	Candidates    []match.Candidate `json:"candidates,omitempty"`
 	SearchID      string            `json:"search_id,omitempty"`
@@ -198,6 +202,11 @@ type Spec struct {
 	GroupID       string
 	ReleaseArtist string
 	ReleaseTitle  string
+	// Source, SourceURL and TrackTitles seed a non-musicbrainz want:
+	// source "lastfm" skips resolution and hunts soulseek directly
+	Source      string
+	SourceURL   string
+	TrackTitles []string
 }
 
 // Add records a new want. A non-empty GroupID pins the release group and
@@ -218,6 +227,10 @@ func (o *Orchestrator) Add(spec Spec) (Want, error) {
 		GroupID:       spec.GroupID,
 		ReleaseArtist: spec.ReleaseArtist,
 		ReleaseTitle:  spec.ReleaseTitle,
+		ReleaseID:     spec.MBID,
+		Source:        spec.Source,
+		SourceURL:     spec.SourceURL,
+		TrackTitles:   spec.TrackTitles,
 		State:         StateQueued,
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -341,6 +354,14 @@ func (o *Orchestrator) withWant(want Want, mutate func(*Want) error) {
 }
 
 func (o *Orchestrator) resolve(ctx context.Context, want Want) {
+	if want.Source == sourceLastFM {
+		// identity came from last.fm; names are authoritative and the
+		// search can start immediately
+		o.withWant(want, func(w *Want) error {
+			return o.beginSearch(ctx, w)
+		})
+		return
+	}
 	if want.MBID == "" && want.GroupID != "" {
 		// the group is pinned; the group search is skipped entirely
 		o.withWant(want, func(w *Want) error {
@@ -444,8 +465,14 @@ func (o *Orchestrator) beginSearchLocked(ctx context.Context, want Want) (Want, 
 }
 
 func (o *Orchestrator) beginSearch(ctx context.Context, want *Want) error {
+	// a last.fm want searches by the authoritative names; the typed
+	// specifier may be the misspelling the lookup corrected
+	artist, album := want.Artist, want.Album
+	if want.Source == sourceLastFM && want.ReleaseArtist != "" && want.ReleaseTitle != "" {
+		artist, album = want.ReleaseArtist, want.ReleaseTitle
+	}
 	search, err := o.cfg.Slskd.CreateSearch(ctx, slskd.SearchRequest{
-		SearchText: want.Artist + " " + want.Album,
+		SearchText: artist + " " + album,
 		FileLimit:  500,
 	})
 	if err != nil {
@@ -493,6 +520,10 @@ const (
 	maxDownloadRetries = 3
 	maxPeers           = 5
 )
+
+// sourceLastFM marks wants whose identity comes from last.fm instead of
+// musicbrainz.
+const sourceLastFM = "lastfm"
 
 func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 	users, err := o.cfg.Slskd.Downloads(ctx)
@@ -577,11 +608,19 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 		if err != nil {
 			return err
 		}
-		result, err := o.cfg.Katyd.Import(importer.Request{
+		req := importer.Request{
 			Dir:     dir,
 			By:      "fetchd",
 			Request: w.ID,
-		})
+		}
+		if w.Source == sourceLastFM {
+			// the importer re-looks the album up on last.fm; the names
+			// must be the exact ones the want was confirmed with
+			req.Source = w.Source
+			req.Artist = w.ReleaseArtist
+			req.Album = w.ReleaseTitle
+		}
+		result, err := o.cfg.Katyd.Import(req)
 		if err != nil {
 			return fmt.Errorf("import %s: %w", dir, err)
 		}

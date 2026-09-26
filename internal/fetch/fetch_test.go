@@ -178,6 +178,63 @@ func TestResolvedNamesRecordedTypedKept(t *testing.T) {
 	}
 }
 
+func TestLastFMWantSkipsResolveAndImportsMarked(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{
+		Artist: "the brown", Album: "mellow", Source: "lastfm",
+		ReleaseArtist: "The Brown", ReleaseTitle: "MelloW",
+		TrackTitles: []string{"Modern play", "森二潜ム"},
+	})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || katydFake.resolves != 0 {
+		t.Fatalf("lastfm want should search without resolve: state %q resolves %d", want.State, katydFake.resolves)
+	}
+	search := slskdFake.searches[want.SearchID]
+	if search.SearchText != "The Brown MelloW" {
+		t.Fatalf("search text %q, want the last.fm names", search.SearchText)
+	}
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+		{Filename: `x\The Brown\MelloW\01 - Modern play.flac`, Size: 9},
+		{Filename: `x\The Brown\MelloW\02 - 森二潜ム.flac`, Size: 19},
+	}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || len(want.Enqueued) != 2 {
+		t.Fatalf("state %q enqueued %d", want.State, len(want.Enqueued))
+	}
+	localDir := filepath.Join(root, "downloads", "MelloW")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "01 - Modern play.flac"), make([]byte, 9), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "02 - 森二潜ム.flac"), make([]byte, 19), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `x\The Brown\MelloW\01 - Modern play.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `x\The Brown\MelloW\02 - 森二潜ム.flac`, Size: 19, State: "Completed, Succeeded"},
+	}}}}}
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "The Brown/[last.fm]"}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateImported {
+		t.Fatalf("state %q err %q", want.State, want.Error)
+	}
+	if len(katydFake.imported) != 1 {
+		t.Fatalf("imports: %+v", katydFake.imported)
+	}
+	req := katydFake.imported[0]
+	if req.Source != "lastfm" || req.Artist != "The Brown" || req.Album != "MelloW" {
+		t.Fatalf("import request should carry lastfm identity: %+v", req)
+	}
+}
+
 func TestPinnedGroupSkipsGroupSearch(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")

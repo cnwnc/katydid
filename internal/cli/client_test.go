@@ -166,7 +166,7 @@ func startDaemonWithImport(t *testing.T) *cli.Client {
 
 	mbClient := mb.New(server.URL, "", false)
 	mbClient.SetRequestInterval(time.Millisecond)
-	manager := importer.New(index, mbClient)
+	manager := importer.New(index, mbClient, nil)
 
 	socket := filepath.Join(t.TempDir(), "test.sock")
 	listener, err := net.Listen("unix", socket)

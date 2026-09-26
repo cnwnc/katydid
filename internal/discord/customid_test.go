@@ -12,6 +12,7 @@ func TestParseAction(t *testing.T) {
 		{customID: customExpand, want: action{kind: actionExpand}},
 		{customID: customPick, values: []string{"grp-1", "grp-2"}, want: action{kind: actionPick, value: "grp-1"}},
 		{customID: customAdd + "grp-1", want: action{kind: actionAdd, value: "grp-1"}},
+		{customID: customLastFM, want: action{kind: actionLastFMAdd}},
 		{customID: customPick, want: action{kind: actionPick}},
 		{customID: customAdd, want: action{kind: actionNone}},
 		{customID: "unknown", want: action{kind: actionNone}},

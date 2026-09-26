@@ -3,6 +3,8 @@ package discord
 import (
 	"strings"
 	"testing"
+
+	"doppel.moe/katydid/internal/lastfm"
 )
 
 func TestCandidateFor(t *testing.T) {
@@ -77,6 +79,20 @@ func TestMatchText(t *testing.T) {
 	}
 	if got := matchText(c, true); got != want+"\n"+autoLine {
 		t.Fatalf("auto text = %q", got)
+	}
+}
+
+func TestLastFMText(t *testing.T) {
+	al := lastfm.Album{Artist: "The Brown", Name: "MelloW", Tracks: []lastfm.Track{{Name: "one"}, {Name: "two"}, {Name: "three"}}}
+	text := lastFMText(addSpec{}, al)
+	for _, want := range []string{"The Brown - MelloW", "3 tracks", "unvetted"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text %q missing %q", text, want)
+		}
+	}
+	empty := lastFMText(addSpec{}, lastfm.Album{Artist: "A", Name: "B"})
+	if !strings.Contains(empty, "0 tracks") {
+		t.Errorf("text %q missing %q", empty, "0 tracks")
 	}
 }
 
