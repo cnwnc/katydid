@@ -17,6 +17,7 @@ import (
 
 	"doppel.moe/katydid/internal/api"
 	"doppel.moe/katydid/internal/importer"
+	"doppel.moe/katydid/internal/library"
 	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/slskd"
 )
@@ -57,6 +58,7 @@ type Want struct {
 	// often match the typed (romanized) spelling better
 	ReleaseArtist string    `json:"release_artist,omitempty"`
 	ReleaseTitle  string    `json:"release_title,omitempty"`
+	ReleaseID     string    `json:"release_id,omitempty"`
 	State         string    `json:"state"`
 	Error         string    `json:"error,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -80,6 +82,7 @@ type Katyd interface {
 	Resolve(artist, album string, year int, mbid string) (api.ResolveResponse, error)
 	ResolveGroup(group string) (api.ResolveResponse, error)
 	Import(req importer.Request) (importer.Result, error)
+	Albums(query library.Query) (api.AlbumsResponse, error)
 	Decide(token string, in importer.DecideInput) (importer.Result, error)
 	RecordedResult(request string) (importer.Result, bool)
 }
@@ -357,9 +360,14 @@ func (o *Orchestrator) resolve(ctx context.Context, want Want) {
 			// an exact release was requested; nothing to disambiguate
 			w.GroupID = response.Candidates[0].GroupID
 			w.ReleaseArtist, w.ReleaseTitle = response.Candidates[0].Artist, response.Candidates[0].Title
+			w.ReleaseID = want.MBID
 			w.TrackCount = response.Candidates[0].TrackCount
 			w.TrackTitles = response.Candidates[0].TrackTitles
 			w.Candidates = nil
+			if o.alreadyOwned(w) {
+				w.State = StateImported
+				return nil
+			}
 			return o.beginSearch(ctx, w)
 		}
 		if response.Auto {
@@ -385,10 +393,39 @@ func (o *Orchestrator) applyGroupRelease(ctx context.Context, w *Want) error {
 		return fmt.Errorf("release group %s has no releases", w.GroupID)
 	}
 	w.ReleaseArtist, w.ReleaseTitle = releases.Candidates[0].Artist, releases.Candidates[0].Title
+	w.ReleaseID = releases.Candidates[0].ReleaseID
 	w.TrackCount = releases.Candidates[0].TrackCount
 	w.TrackTitles = releases.Candidates[0].TrackTitles
 	w.Candidates = nil
+	if o.alreadyOwned(w) {
+		w.State = StateImported
+		return nil
+	}
 	return o.beginSearch(ctx, w)
+}
+
+// alreadyOwned short-circuits a want whose release is already in the
+// library: re-downloading the same release id adds nothing. A failed
+// library listing fails open and fetches as usual. The share link is
+// still minted by the bot, which looks the album up by release id in
+// navidrome.
+func (o *Orchestrator) alreadyOwned(w *Want) bool {
+	if w.ReleaseID == "" {
+		return false
+	}
+	albums, err := o.cfg.Katyd.Albums(library.Query{})
+	if err != nil {
+		return false
+	}
+	for _, album := range albums.Albums {
+		if !strings.EqualFold(album.Meta.ReleaseID, w.ReleaseID) {
+			continue
+		}
+		w.AlbumID = album.ID
+		w.Notes = append(w.Notes, "already in the library as "+album.ID+"; nothing downloaded")
+		return true
+	}
+	return false
 }
 
 func (o *Orchestrator) beginSearchLocked(ctx context.Context, want Want) (Want, error) {
