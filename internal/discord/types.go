@@ -17,15 +17,17 @@ type resolveResponse struct {
 
 // Want is the slice of a fetchd want the bot renders.
 type Want struct {
-	ID            string   `json:"id"`
-	Artist        string   `json:"artist"`
-	Album         string   `json:"album"`
-	Year          int      `json:"year,omitempty"`
-	State         string   `json:"state"`
-	Error         string   `json:"error,omitempty"`
-	AlbumID       string   `json:"album_id,omitempty"`
-	DecisionToken string   `json:"decision_token,omitempty"`
-	Notes         []string `json:"notes,omitempty"`
+	ID            string     `json:"id"`
+	Artist        string     `json:"artist"`
+	Album         string     `json:"album"`
+	Year          int        `json:"year,omitempty"`
+	State         string     `json:"state"`
+	Error         string     `json:"error,omitempty"`
+	AlbumID       string     `json:"album_id,omitempty"`
+	DecisionToken string     `json:"decision_token,omitempty"`
+	Notes         []string   `json:"notes,omitempty"`
+	Enqueued      []struct{} `json:"enqueued,omitempty"`
+	Downloaded    int        `json:"downloaded,omitempty"`
 }
 
 type wantResponse struct {

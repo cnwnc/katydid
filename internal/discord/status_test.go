@@ -21,6 +21,13 @@ func TestStatusLineInProgressWithError(t *testing.T) {
 	}
 }
 
+func TestStatusLineDownloadProgress(t *testing.T) {
+	w := Want{Artist: "A", Album: "B", State: stateDownloading, Enqueued: make([]struct{}, 12), Downloaded: 5}
+	if got, want := statusLine(w), "A - B: downloading (5/12)"; got != want {
+		t.Fatalf("statusLine = %q, want %q", got, want)
+	}
+}
+
 func TestStatusLineImported(t *testing.T) {
 	w := Want{ID: "abc", Artist: "A", Album: "B", State: stateImported, AlbumID: "alb-1"}
 	if got := statusLine(w); got != "Imported A - B (album alb-1)." {

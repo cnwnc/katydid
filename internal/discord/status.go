@@ -45,6 +45,11 @@ func statusLine(w Want) string {
 		b.WriteString("\nWant " + w.ID + " — retry with /addalbum or inspect with /want.")
 	case stateNeedsDecision:
 		b.WriteString("Needs a manual decision — run `kat decisions` / `kat decide <token>`; token: " + w.DecisionToken)
+	case stateDownloading:
+		b.WriteString(w.Artist + " - " + w.Album + ": " + w.State)
+		if len(w.Enqueued) > 0 {
+			fmt.Fprintf(&b, " (%d/%d)", w.Downloaded, len(w.Enqueued))
+		}
 	default:
 		b.WriteString(w.Artist + " - " + w.Album + ": " + w.State)
 	}
