@@ -97,25 +97,25 @@ type DirectoryResponse struct {
 }
 
 type Transfer struct {
-	ID               string  `json:"id"`
-	Username         string  `json:"username"`
-	Direction        string  `json:"direction"`
-	Filename         string  `json:"filename"`
-	Size             int64   `json:"size"`
-	State            string  `json:"state"`
-	RequestedAt      Time    `json:"requestedAt"`
-	EnqueuedAt       *Time   `json:"enqueuedAt"`
-	StartedAt        *Time   `json:"startedAt"`
-	EndedAt          *Time   `json:"endedAt"`
-	BytesTransferred int64   `json:"bytesTransferred"`
-	AverageSpeed     float64 `json:"averageSpeed"`
-	PlaceInQueue     *int64  `json:"placeInQueue"`
-	Exception        *string `json:"exception"`
-	Attempts         int     `json:"attempts"`
-	NextAttemptAt    *Time   `json:"nextAttemptAt"`
-	Removed          bool    `json:"removed"`
-	BytesRemaining   int64   `json:"bytesRemaining"`
-	PercentComplete  float64 `json:"percentComplete"`
+	ID               string    `json:"id"`
+	Username         string    `json:"username"`
+	Direction        string    `json:"direction"`
+	Filename         string    `json:"filename"`
+	Size             int64     `json:"size"`
+	State            string    `json:"state"`
+	RequestedAt      Time      `json:"requestedAt"`
+	EnqueuedAt       *Time     `json:"enqueuedAt"`
+	StartedAt        *Time     `json:"startedAt"`
+	EndedAt          *Time     `json:"endedAt"`
+	BytesTransferred int64     `json:"bytesTransferred"`
+	AverageSpeed     float64   `json:"averageSpeed"`
+	PlaceInQueue     *int64    `json:"placeInQueue"`
+	Exception        *string   `json:"exception"`
+	Attempts         int       `json:"attempts"`
+	NextAttemptAt    *Time     `json:"nextAttemptAt"`
+	Removed          bool      `json:"removed"`
+	BytesRemaining   int64     `json:"bytesRemaining"`
+	PercentComplete  float64   `json:"percentComplete"`
 	RemainingTime    *Duration `json:"remainingTime"`
 }
 

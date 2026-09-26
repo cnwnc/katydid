@@ -3,12 +3,12 @@ package slskd_test
 import (
 	"context"
 	"encoding/json"
-	"time"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"doppel.moe/katydid/internal/slskd"
 )
