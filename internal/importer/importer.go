@@ -118,6 +118,29 @@ type Manager struct {
 
 	mu        sync.Mutex
 	decisions map[string]*pending
+	results   map[string]Result
+}
+
+// RecordedResult reports the outcome of an import request keyed by its
+// Request id, for callers that drove a decision through another channel.
+func (m *Manager) RecordedResult(request string) (Result, bool) {
+	if request == "" {
+		return Result{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result, ok := m.results[request]
+	return result, ok
+}
+
+func (m *Manager) record(request string, result Result) {
+	if request == "" {
+		return
+	}
+	if m.results == nil {
+		m.results = map[string]Result{}
+	}
+	m.results[request] = result
 }
 
 func New(index *library.Index, client *mb.Client) *Manager {
@@ -159,6 +182,7 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 		if coverage := match.Coverage(evidence.TrackTitles, release); coverage >= 0.8 {
 			albumID, importedNotes, err := m.publish(req, release, files, nil, false)
 			if err == nil {
+				m.record(req.Request, Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: importedNotes})
 				return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: importedNotes}, nil
 			}
 			if !errors.Is(err, ErrUnmatchedFiles) {
@@ -207,7 +231,9 @@ func (m *Manager) importByMBID(ctx context.Context, req Request, files []sourceF
 	if coverage < 0.8 {
 		notes = append(notes, fmt.Sprintf("track title coverage %d%% - verify the files belong to this release", int(coverage*100)))
 	}
-	return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}, nil
+	result := Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}
+	m.record(req.Request, result)
+	return &result, nil
 }
 
 func (m *Manager) Decide(ctx context.Context, token string, in DecideInput) (*Result, error) {
@@ -220,6 +246,7 @@ func (m *Manager) Decide(ctx context.Context, token string, in DecideInput) (*Re
 	}
 	if in.Skip {
 		delete(m.decisions, token)
+		m.record(p.request.Request, Result{Status: statusSkipped})
 		return &Result{Status: statusSkipped}, nil
 	}
 	if in.Pick != 0 {
@@ -271,7 +298,9 @@ func (m *Manager) Decide(ctx context.Context, token string, in DecideInput) (*Re
 		return nil, err
 	}
 	delete(m.decisions, token)
-	return &Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}, nil
+	result := Result{Status: statusImported, AlbumID: albumID, Format: formatLabel(release), Notes: notes}
+	m.record(p.request.Request, result)
+	return &result, nil
 }
 
 // remapResult keeps the decision open and reports the file-to-track

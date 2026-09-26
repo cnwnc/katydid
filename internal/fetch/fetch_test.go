@@ -66,6 +66,7 @@ type fakeKatyd struct {
 	importResult importer.Result
 	decided      []string
 	decideResult importer.Result
+	recorded     map[string]importer.Result
 }
 
 func (f *fakeKatyd) Resolve(_ string, _ string, _ int, _ string) (api.ResolveResponse, error) {
@@ -320,6 +321,7 @@ func TestImportNeedingDecisionPassthrough(t *testing.T) {
 }
 
 func TestFailedTransfersFailTheWant(t *testing.T) {
+	t.Skip("superseded: failures now re-enqueue; covered by TestFailedTransfersAreReenqueued")
 	slskdFake := newFakeSlskd()
 	katydFake := &fakeKatyd{
 		resolve: api.ResolveResponse{
@@ -412,3 +414,104 @@ func TestAddValidation(t *testing.T) {
 }
 
 func strPtr(value string) *string { return &value }
+
+func (f *fakeKatyd) RecordedResult(request string) (importer.Result, bool) {
+	if f.recorded == nil {
+		return importer.Result{}, false
+	}
+	result, ok := f.recorded[request]
+	return result, ok
+}
+
+func TestWantsInNeedsPickReconcileExternalDecision(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := &fakeKatyd{
+		resolve: api.ResolveResponse{
+			Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 1, TitleSim: 1, ArtistSim: 1}},
+			Auto:       true,
+		},
+		importResult: importer.Result{Status: "needs_decision", Decision: &importer.Decision{
+			Token: "tok-1", Candidates: []match.Candidate{{ReleaseID: "r1"}},
+		}},
+	}
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer",
+		Files:    []slskd.File{{Filename: `dir\SAETIA\01.flac`, Size: 9}},
+	}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	os.WriteFile(filepath.Join(localDir, "01.flac"), make([]byte, 9), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{
+		Username: "peer",
+		Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{{
+			ID: "t1", Filename: `dir\SAETIA\01.flac`, Size: 9, State: "Completed, Succeeded",
+		}}}},
+	}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateNeedsPick {
+		t.Fatalf("state = %q, want needs_decision", want.State)
+	}
+
+	// resolved externally through kat decide: katyd recorded the outcome
+	katydFake.recorded = map[string]importer.Result{
+		want.ID: {Status: "imported", AlbumID: "saetia_saetia_1998"},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateImported || want.AlbumID != "saetia_saetia_1998" {
+		t.Fatalf("state = %q album = %q, want imported", want.State, want.AlbumID)
+	}
+}
+
+func TestFailedTransfersAreReenqueued(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := &fakeKatyd{
+		resolve: api.ResolveResponse{
+			Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 2, TitleSim: 1, ArtistSim: 1}},
+			Auto:       true,
+		},
+	}
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer",
+		Files: []slskd.File{
+			{Filename: `dir\SAETIA\01.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02.flac`, Size: 19},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	before := len(slskdFake.enqueuedSeq)
+	slskdFake.downloads = []slskd.UserResponse{{
+		Username: "peer",
+		Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t1", Filename: `dir\SAETIA\01.flac`, Size: 9, State: "Completed, Succeeded"},
+			{ID: "t2", Filename: `dir\SAETIA\02.flac`, Size: 19, State: "Completed, Errored",
+				Exception: strPtr("Too many files")},
+		}}},
+	}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading {
+		t.Fatalf("state = %q (%s), want still downloading while retrying", want.State, want.Error)
+	}
+	if len(slskdFake.enqueuedSeq) != before+1 {
+		t.Fatalf("failed file should be re-enqueued: %d enqueues", len(slskdFake.enqueuedSeq)-before)
+	}
+	cumulative := slskdFake.enqueued["peer"]
+	if len(cumulative) != 3 || cumulative[2].Filename != `dir\SAETIA\02.flac` {
+		t.Fatalf("last enqueue should be only the failed file: %+v", cumulative)
+	}
+}

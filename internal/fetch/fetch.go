@@ -62,6 +62,8 @@ type Want struct {
 	Enqueued      []slskd.File      `json:"enqueued,omitempty"`
 	DecisionToken string            `json:"decision_token,omitempty"`
 	AlbumID       string            `json:"album_id,omitempty"`
+	Attempts      map[string]int    `json:"attempts,omitempty"`
+	Notes         []string          `json:"notes,omitempty"`
 }
 
 // Katyd is the slice of the katyd client the orchestrator needs.
@@ -69,6 +71,7 @@ type Katyd interface {
 	Resolve(artist, album string, year int, mbid string) (api.ResolveResponse, error)
 	Import(req importer.Request) (importer.Result, error)
 	Decide(token string, in importer.DecideInput) (importer.Result, error)
+	RecordedResult(request string) (importer.Result, bool)
 }
 
 // Slskd is the slice of the slskd client the orchestrator needs.
@@ -276,7 +279,9 @@ func (o *Orchestrator) Tick(ctx context.Context) {
 			o.pollSearch(ctx, want)
 		case StateDownloading:
 			o.pollTransfers(ctx, want)
-		case StateNeedsRelease, StateNeedsPick, StateImported, StateSkipped, StateFailed:
+		case StateNeedsPick:
+			o.reconcileDecision(ctx, want)
+		case StateNeedsRelease, StateImported, StateSkipped, StateFailed:
 		}
 	}
 }
@@ -370,6 +375,10 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 	})
 }
 
+// maxDownloadRetries bounds how often a failed transfer is re-enqueued
+// before the want fails.
+const maxDownloadRetries = 3
+
 func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 	users, err := o.cfg.Slskd.Downloads(ctx)
 	o.withWant(want, func(w *Want) error {
@@ -386,14 +395,21 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 		}
 		enqueued := map[string]int64{}
+		filesByName := map[string]slskd.File{}
 		for _, file := range w.Enqueued {
 			enqueued[file.Filename] = file.Size
+			filesByName[file.Filename] = file
 		}
 		byName := map[string]slskd.Transfer{}
 		for _, transfer := range transfers {
-			if _, wanted := enqueued[transfer.Filename]; wanted {
-				byName[transfer.Filename] = transfer
+			if _, wanted := enqueued[transfer.Filename]; !wanted {
+				continue
 			}
+			// re-enqueued files appear twice; the newest entry wins
+			if existing, ok := byName[transfer.Filename]; ok && existing.RequestedAt.After(transfer.RequestedAt.Time) {
+				continue
+			}
+			byName[transfer.Filename] = transfer
 		}
 		if len(byName) < len(enqueued) {
 			if time.Since(w.UpdatedAt) > staleAfter {
@@ -401,22 +417,46 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 			return nil
 		}
-		succeeded, failed := 0, []string{}
+		succeeded := 0
+		failed := []slskd.Transfer{}
 		for name := range enqueued {
 			transfer := byName[name]
 			switch {
 			case slskd.TransferSucceeded(transfer.State):
 				succeeded++
+				delete(w.Attempts, name)
 			case slskd.TransferFailed(transfer.State):
+				failed = append(failed, transfer)
+			}
+		}
+		if len(failed) > 0 {
+			retry := []slskd.File{}
+			summary := []string{}
+			for _, transfer := range failed {
 				reason := "unknown reason"
 				if transfer.Exception != nil {
 					reason = *transfer.Exception
 				}
-				failed = append(failed, fmt.Sprintf("%s: %s", filepath.Base(name), reason))
+				label := fmt.Sprintf("%s: %s", filepath.Base(remoteName(transfer.Filename)), reason)
+				if w.Attempts == nil {
+					w.Attempts = map[string]int{}
+				}
+				w.Attempts[transfer.Filename]++
+				if w.Attempts[transfer.Filename] <= maxDownloadRetries {
+					retry = append(retry, filesByName[transfer.Filename])
+					summary = append(summary, label+" (re-enqueued)")
+					continue
+				}
+				summary = append(summary, label)
 			}
-		}
-		if len(failed) > 0 {
-			return fmt.Errorf("%d of %d transfers failed: %s", len(failed), len(enqueued), strings.Join(failed, "; "))
+			if len(retry) > 0 {
+				if err := o.cfg.Slskd.EnqueueDownloads(ctx, w.Peer, retry); err != nil {
+					return fmt.Errorf("re-enqueue %d failed files: %w", len(retry), err)
+				}
+				w.Notes = append(w.Notes, fmt.Sprintf("re-enqueued %d failed file(s): %s", len(retry), strings.Join(summary, "; ")))
+				return nil
+			}
+			return fmt.Errorf("%d of %d transfers failed: %s", len(failed), len(enqueued), strings.Join(summary, "; "))
 		}
 		if succeeded < len(enqueued) {
 			return nil
@@ -434,6 +474,24 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			return fmt.Errorf("import %s: %w", dir, err)
 		}
 		return o.absorbResult(w, result)
+	})
+}
+
+// reconcileDecision picks up decisions resolved through another client;
+// the kat cli talks to katyd directly, and the outcome is recorded under
+// the want id.
+func (o *Orchestrator) reconcileDecision(ctx context.Context, want Want) {
+	result, found := o.cfg.Katyd.RecordedResult(want.ID)
+	if !found {
+		return
+	}
+	o.withWant(want, func(w *Want) error {
+		if err := o.absorbResult(w, result); err != nil {
+			return err
+		}
+		w.Notes = append(w.Notes, "decision resolved outside fetchd")
+		w.DecisionToken = ""
+		return nil
 	})
 }
 

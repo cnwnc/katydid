@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /import", s.importStart)
 	mux.HandleFunc("POST /import/decide", s.importDecide)
 	mux.HandleFunc("GET /decisions", s.decisions)
+	mux.HandleFunc("GET /import/result", s.importResult)
 	mux.HandleFunc("GET /resolve", s.resolve)
 	mux.HandleFunc("POST /retag", s.retag)
 	return mux
@@ -158,6 +159,23 @@ func (s *Server) importDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) importResult(w http.ResponseWriter, r *http.Request) {
+	if s.Import == nil {
+		writeError(w, http.StatusServiceUnavailable, "import is not configured on this daemon")
+		return
+	}
+	request := r.URL.Query().Get("request")
+	if request == "" {
+		writeError(w, http.StatusBadRequest, "request parameter is required")
+		return
+	}
+	result, found := s.Import.RecordedResult(request)
+	writeJSON(w, http.StatusOK, struct {
+		Found  bool            `json:"found"`
+		Result importer.Result `json:"result"`
+	}{Found: found, Result: result})
 }
 
 func (s *Server) decisions(w http.ResponseWriter, r *http.Request) {

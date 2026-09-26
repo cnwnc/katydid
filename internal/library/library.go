@@ -22,6 +22,8 @@ type Meta struct {
 	AlbumArtist string      `json:"albumartist"`
 	Album       string      `json:"album"`
 	Year        int         `json:"year,omitempty"`
+	By          string      `json:"by,omitempty"`
+	Request     string      `json:"request,omitempty"`
 	Tracks      []TrackMeta `json:"tracks"`
 }
 
@@ -33,9 +35,10 @@ type Album struct {
 }
 
 type Query struct {
-	Q      string
-	Artist string
-	Year   int
+	Q       string
+	Artist  string
+	Year    int
+	Request string
 }
 
 type Status struct {
@@ -169,6 +172,9 @@ func albumMatches(album Album, query Query) bool {
 		return false
 	}
 	if query.Artist != "" && !strings.Contains(strings.ToLower(album.Meta.AlbumArtist), strings.ToLower(query.Artist)) {
+		return false
+	}
+	if query.Request != "" && album.Meta.Request != query.Request {
 		return false
 	}
 	if query.Q != "" && !matchesQ(album, strings.ToLower(query.Q)) {
