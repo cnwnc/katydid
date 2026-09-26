@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,13 +51,14 @@ func New(base, username, password string) *Client {
 	}
 }
 
-// BaseURL resolves the server address: the default is http://127.0.0.1
-// (not localhost, which may resolve to ::1 first), base overrides scheme
-// and host, port overrides the port. A base that already carries a port
-// wins unless port is also given.
+// BaseURL resolves the server address: with no base it is
+// http://127.0.0.1:4533 (not localhost, which may resolve to ::1 first).
+// A given base keeps its own port or its scheme's default, so a proxied
+// https://host works as is; port overrides either way.
 func BaseURL(base, port string) (string, error) {
+	defaultPort := ""
 	if base == "" {
-		base = "http://127.0.0.1"
+		base, defaultPort = "http://127.0.0.1", "4533"
 	}
 	parsed, err := url.Parse(strings.TrimRight(base, "/"))
 	if err != nil {
@@ -65,11 +67,11 @@ func BaseURL(base, port string) (string, error) {
 	if parsed.Scheme == "" || parsed.Hostname() == "" {
 		return "", fmt.Errorf("navidrome base url %q needs scheme and host", base)
 	}
-	switch {
-	case port != "":
-		parsed.Host = parsed.Hostname() + ":" + port
-	case parsed.Port() == "":
-		parsed.Host = parsed.Host + ":4533"
+	if port == "" {
+		port = defaultPort
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(parsed.Hostname(), port)
 	}
 	return parsed.String(), nil
 }

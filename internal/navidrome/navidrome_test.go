@@ -150,11 +150,12 @@ func TestBaseURL(t *testing.T) {
 	}{
 		{"", "", "http://127.0.0.1:4533"},
 		{"", "4600", "http://127.0.0.1:4600"},
-		{"http://localhost", "", "http://localhost:4533"},
-		{"http://10.100.0.2", "", "http://10.100.0.2:4533"},
+		{"https://navi.doppel.moe", "", "https://navi.doppel.moe"},
+		{"https://navi.doppel.moe/", "", "https://navi.doppel.moe"},
+		{"http://10.100.0.2", "4533", "http://10.100.0.2:4533"},
 		{"http://10.100.0.2:1234", "", "http://10.100.0.2:1234"},
-		{"http://10.100.0.2", "80", "http://10.100.0.2:80"},
-		{"http://10.100.0.2:1234/", "", "http://10.100.0.2:1234"},
+		{"http://10.100.0.2:1234", "80", "http://10.100.0.2:80"},
+		{"http://[::1]", "4533", "http://[::1]:4533"},
 	}
 	for _, c := range cases {
 		got, err := BaseURL(c.base, c.port)
