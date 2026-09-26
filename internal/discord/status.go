@@ -29,28 +29,25 @@ func statusLine(w Want) string {
 	var b strings.Builder
 	switch w.State {
 	case stateImported:
-		b.WriteString("Imported " + w.Artist + " - " + w.Album)
-		if w.AlbumID != "" {
-			b.WriteString(" (" + w.AlbumID + ")")
-		}
+		b.WriteString("Imported: " + w.Label())
 	case stateSkipped:
-		b.WriteString("Skipped " + w.Artist + " - " + w.Album + ".")
+		b.WriteString("Skipped " + w.Label() + ".")
 	case stateFailed:
 		if w.Error != "" {
-			b.WriteString("Failed " + w.Artist + " - " + w.Album + ": " + w.Error)
+			b.WriteString("Failed " + w.Label() + ": " + w.Error)
 		} else {
-			b.WriteString("Failed " + w.Artist + " - " + w.Album + ".")
+			b.WriteString("Failed " + w.Label() + ".")
 		}
 		b.WriteString("\nWant " + w.ID + " — retry with /addalbum or inspect with /want.")
 	case stateNeedsDecision:
 		b.WriteString("Needs a manual decision — run `kat decisions` / `kat decide <token>`; token: " + w.DecisionToken)
 	case stateDownloading:
-		b.WriteString(w.Artist + " - " + w.Album + ": " + w.State)
+		b.WriteString(w.Label() + ": " + w.State)
 		if len(w.Enqueued) > 0 {
 			fmt.Fprintf(&b, " (%d/%d)", w.Downloaded, len(w.Enqueued))
 		}
 	default:
-		b.WriteString(w.Artist + " - " + w.Album + ": " + w.State)
+		b.WriteString(w.Label() + ": " + w.State)
 	}
 	if tail := notesTail(w.Notes, notesTailSize); tail != "" {
 		b.WriteString("\n" + tail)
@@ -84,7 +81,7 @@ func listText(wants []Want) string {
 	}
 	lines := make([]string, 0, listLineLimit)
 	for _, w := range wants {
-		lines = append(lines, fmt.Sprintf("%s %s %s - %s", w.ID, w.State, w.Artist, w.Album))
+		lines = append(lines, fmt.Sprintf("%s %s %s", w.ID, w.State, w.Label()))
 	}
 	if len(lines) > listLineLimit {
 		return strings.Join(lines[:listLineLimit], "\n") + fmt.Sprintf("\n…and %d more", len(wants)-listLineLimit)
@@ -95,7 +92,7 @@ func listText(wants []Want) string {
 // wantText renders the /want detail view.
 func wantText(w Want) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s - %s", w.Artist, w.Album)
+	b.WriteString(w.Label())
 	if w.Year != 0 {
 		fmt.Fprintf(&b, " (%d)", w.Year)
 	}

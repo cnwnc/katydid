@@ -28,6 +28,21 @@ type Want struct {
 	Notes         []string   `json:"notes,omitempty"`
 	Enqueued      []struct{} `json:"enqueued,omitempty"`
 	Downloaded    int        `json:"downloaded,omitempty"`
+	ReleaseArtist string     `json:"release_artist,omitempty"`
+	ReleaseTitle  string     `json:"release_title,omitempty"`
+}
+
+// Label names the want for display: the musicbrainz names once fetchd
+// resolved them, the typed specifier before that.
+func (w Want) Label() string {
+	artist, album := w.Artist, w.Album
+	if w.ReleaseArtist != "" {
+		artist = w.ReleaseArtist
+	}
+	if w.ReleaseTitle != "" {
+		album = w.ReleaseTitle
+	}
+	return artist + " - " + album
 }
 
 type wantResponse struct {

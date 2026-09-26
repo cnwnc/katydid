@@ -44,18 +44,23 @@ var audioExtensions = map[string]bool{
 const staleAfter = 6 * time.Hour
 
 type Want struct {
-	ID          string    `json:"id"`
-	Artist      string    `json:"artist"`
-	Album       string    `json:"album"`
-	Year        int       `json:"year,omitempty"`
-	MBID        string    `json:"mbid,omitempty"`
-	TrackCount  int       `json:"track_count,omitempty"`
-	TrackTitles []string  `json:"track_titles,omitempty"`
-	GroupID     string    `json:"group_id,omitempty"`
-	State       string    `json:"state"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string   `json:"id"`
+	Artist      string   `json:"artist"`
+	Album       string   `json:"album"`
+	Year        int      `json:"year,omitempty"`
+	MBID        string   `json:"mbid,omitempty"`
+	TrackCount  int      `json:"track_count,omitempty"`
+	TrackTitles []string `json:"track_titles,omitempty"`
+	GroupID     string   `json:"group_id,omitempty"`
+	// ReleaseArtist and ReleaseTitle are the musicbrainz names once
+	// resolved; Artist and Album stay as typed, since soulseek folders
+	// often match the typed (romanized) spelling better
+	ReleaseArtist string    `json:"release_artist,omitempty"`
+	ReleaseTitle  string    `json:"release_title,omitempty"`
+	State         string    `json:"state"`
+	Error         string    `json:"error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	Candidates    []match.Candidate `json:"candidates,omitempty"`
 	SearchID      string            `json:"search_id,omitempty"`
@@ -336,6 +341,7 @@ func (o *Orchestrator) resolve(ctx context.Context, want Want) {
 		if want.MBID != "" {
 			// an exact release was requested; nothing to disambiguate
 			w.GroupID = response.Candidates[0].GroupID
+			w.ReleaseArtist, w.ReleaseTitle = response.Candidates[0].Artist, response.Candidates[0].Title
 			w.TrackCount = response.Candidates[0].TrackCount
 			w.TrackTitles = response.Candidates[0].TrackTitles
 			w.Candidates = nil
@@ -363,6 +369,7 @@ func (o *Orchestrator) applyGroupRelease(ctx context.Context, w *Want) error {
 	if len(releases.Candidates) == 0 {
 		return fmt.Errorf("release group %s has no releases", w.GroupID)
 	}
+	w.ReleaseArtist, w.ReleaseTitle = releases.Candidates[0].Artist, releases.Candidates[0].Title
 	w.TrackCount = releases.Candidates[0].TrackCount
 	w.TrackTitles = releases.Candidates[0].TrackTitles
 	w.Candidates = nil

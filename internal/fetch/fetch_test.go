@@ -133,6 +133,23 @@ func TestQueuedToSearchingOnAutoResolve(t *testing.T) {
 	}
 }
 
+func TestResolvedNamesRecordedTypedKept(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	katydFake.resolveGroup.Candidates[0].Artist = "Saetia"
+	katydFake.resolveGroup.Candidates[0].Title = "Saetia"
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add("saeita", "saeita", 0, "", "rg-1")
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.ReleaseArtist != "Saetia" || want.ReleaseTitle != "Saetia" {
+		t.Fatalf("resolved names = %q / %q", want.ReleaseArtist, want.ReleaseTitle)
+	}
+	if want.Artist != "saeita" || want.Album != "saeita" {
+		t.Fatalf("typed specifier should be kept: %q / %q", want.Artist, want.Album)
+	}
+}
+
 func TestPinnedGroupSkipsGroupSearch(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")

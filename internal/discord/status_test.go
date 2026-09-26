@@ -28,13 +28,28 @@ func TestStatusLineDownloadProgress(t *testing.T) {
 	}
 }
 
+func TestStatusLinePrefersResolvedNames(t *testing.T) {
+	w := Want{Artist: "operation sodastel", Album: "slaney vs sodastel", State: stateSearching}
+	if got, want := statusLine(w), "operation sodastel - slaney vs sodastel: searching"; got != want {
+		t.Fatalf("before resolve: %q, want %q", got, want)
+	}
+	w.ReleaseArtist, w.ReleaseTitle = "Operation Sodasteal", "SLANEY VS. SODASTEAL"
+	if got, want := statusLine(w), "Operation Sodasteal - SLANEY VS. SODASTEAL: searching"; got != want {
+		t.Fatalf("after resolve: %q, want %q", got, want)
+	}
+}
+
 func TestStatusLineImported(t *testing.T) {
 	w := Want{ID: "abc", Artist: "A", Album: "B", State: stateImported, AlbumID: "alb-1"}
-	if got := statusLine(w); got != "Imported A - B (alb-1)" {
+	if got := statusLine(w); got != "Imported: A - B" {
 		t.Fatalf("line = %q", got)
 	}
 	w.AlbumID = ""
-	if got := statusLine(w); got != "Imported A - B" {
+	if got := statusLine(w); got != "Imported: A - B" {
+		t.Fatalf("line = %q", got)
+	}
+	w.ReleaseArtist, w.ReleaseTitle = "Real Artist", "Real Album"
+	if got := statusLine(w); got != "Imported: Real Artist - Real Album" {
 		t.Fatalf("line = %q", got)
 	}
 }
