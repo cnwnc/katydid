@@ -233,7 +233,7 @@ func yearSimilarity(a, b int) float64 {
 	case a == 0:
 		return 0.5
 	case b == 0:
-		return 0.3
+		return 0.5
 	}
 	diff := a - b
 	if diff < 0 {

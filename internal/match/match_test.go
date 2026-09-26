@@ -190,8 +190,8 @@ func TestYearSimilarity(t *testing.T) {
 	if got := yearSimilarity(0, 2001); got != 0.5 {
 		t.Errorf("missing year: got %f, want 0.5", got)
 	}
-	if got := yearSimilarity(2001, 0); got != 0.3 {
-		t.Errorf("dateless release with known year: got %f, want 0.3", got)
+	if got := yearSimilarity(2001, 0); got != 0.5 {
+		t.Errorf("dateless release with known year: got %f, want 0.5 (unknown is neutral)", got)
 	}
 	if got := yearSimilarity(2001, 2015); got != 0.2 {
 		t.Errorf("far years: got %f, want 0.2", got)
