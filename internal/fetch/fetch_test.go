@@ -60,13 +60,15 @@ func (f *fakeSlskd) Downloads(_ context.Context) ([]slskd.UserResponse, error) {
 }
 
 type fakeKatyd struct {
-	resolve      api.ResolveResponse
-	resolveErr   error
-	imported     []importer.Request
-	importResult importer.Result
-	decided      []string
-	decideResult importer.Result
-	recorded     map[string]importer.Result
+	resolve         api.ResolveResponse
+	resolveErr      error
+	imported        []importer.Request
+	importResult    importer.Result
+	decided         []string
+	decideResult    importer.Result
+	recorded        map[string]importer.Result
+	resolveGroup    api.ResolveResponse
+	resolveGroupFor string
 }
 
 func (f *fakeKatyd) Resolve(_ string, _ string, _ int, _ string) (api.ResolveResponse, error) {
@@ -109,10 +111,7 @@ func find(t *testing.T, orchestrator *fetch.Orchestrator, id string) fetch.Want 
 
 func TestQueuedToSearchingOnAutoResolve(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{resolve: api.ResolveResponse{
-		Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 2, TitleSim: 1, ArtistSim: 1}},
-		Auto:       true,
-	}}
+	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
 	want, err := orchestrator.Add("saetia", "saetia", 1998, "")
 	if err != nil {
@@ -133,13 +132,17 @@ func TestQueuedToSearchingOnAutoResolve(t *testing.T) {
 
 func TestLowConfidenceGatesOnReleasePick(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{resolve: api.ResolveResponse{
-		Candidates: []match.Candidate{
-			{ReleaseID: "r1", TrackCount: 10, TitleSim: 0.7, ArtistSim: 1},
-			{ReleaseID: "r2", TrackCount: 12, TitleSim: 0.65, ArtistSim: 0.9},
+	katydFake := &fakeKatyd{
+		resolve: api.ResolveResponse{
+			Candidates: []match.Candidate{
+				{ReleaseID: "r1", TitleSim: 0.7, ArtistSim: 1},
+				{ReleaseID: "r2", TitleSim: 0.65, ArtistSim: 0.9},
+			},
+			Auto: false,
 		},
-		Auto: false,
-	}}
+		resolveGroup:    api.ResolveResponse{Candidates: []match.Candidate{{ReleaseID: "r2-rel", TrackCount: 12, TitleSim: 1, ArtistSim: 1, TrackTitles: []string{"A", "B"}}}, Auto: true},
+		resolveGroupFor: "r2",
+	}
 	orchestrator, _ := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("drukqs", "drukqs", 2001, "")
 	orchestrator.Tick(context.Background())
@@ -167,10 +170,7 @@ func TestLowConfidenceGatesOnReleasePick(t *testing.T) {
 
 func TestSearchToDownloadPicksBestDirectory(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{resolve: api.ResolveResponse{
-		Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 2, TitleSim: 1, ArtistSim: 1}},
-		Auto:       true,
-	}}
+	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
 	orchestrator.Tick(context.Background())
@@ -212,13 +212,8 @@ func TestSearchToDownloadPicksBestDirectory(t *testing.T) {
 
 func TestDownloadToImportHappyPath(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{
-		resolve: api.ResolveResponse{
-			Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 1, TitleSim: 1, ArtistSim: 1}},
-			Auto:       true,
-		},
-		importResult: importer.Result{Status: "imported", AlbumID: "saetia_saetia_1998"},
-	}
+	katydFake := autoTitlesResolver("vault")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "saetia_saetia_1998"}
 	orchestrator, root := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
 	orchestrator.Tick(context.Background())
@@ -267,16 +262,11 @@ func TestDownloadToImportHappyPath(t *testing.T) {
 
 func TestImportNeedingDecisionPassthrough(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{
-		resolve: api.ResolveResponse{
-			Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 1, TitleSim: 1, ArtistSim: 1}},
-			Auto:       true,
-		},
-		importResult: importer.Result{Status: "needs_decision", Decision: &importer.Decision{
-			Token: "tok123", Dir: "/x", Candidates: []match.Candidate{{ReleaseID: "r1"}},
-		}},
-		decideResult: importer.Result{Status: "imported", AlbumID: "picked"},
-	}
+	katydFake := autoTitlesResolver("vault")
+	katydFake.importResult = importer.Result{Status: "needs_decision", Decision: &importer.Decision{
+		Token: "tok123", Dir: "/x", Candidates: []match.Candidate{{ReleaseID: "r1"}},
+	}}
+	katydFake.decideResult = importer.Result{Status: "imported", AlbumID: "picked"}
 	orchestrator, root := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
 	orchestrator.Tick(context.Background())
@@ -285,16 +275,16 @@ func TestImportNeedingDecisionPassthrough(t *testing.T) {
 	search.IsComplete = true
 	search.Responses = []slskd.Response{{
 		Username: "peer",
-		Files:    []slskd.File{{Filename: `dir\SAETIA\01.flac`, Size: 9}},
+		Files:    []slskd.File{{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9}},
 	}}
 	orchestrator.Tick(context.Background())
 	localDir := filepath.Join(root, "downloads", "SAETIA")
 	os.MkdirAll(localDir, 0o755)
-	os.WriteFile(filepath.Join(localDir, "01.flac"), make([]byte, 9), 0o644)
+	os.WriteFile(filepath.Join(localDir, "01 - vault.flac"), make([]byte, 9), 0o644)
 	slskdFake.downloads = []slskd.UserResponse{{
 		Username: "peer",
 		Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{{
-			ID: "t1", Filename: `dir\SAETIA\01.flac`, Size: 9, State: "Completed, Succeeded",
+			ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded",
 		}}}},
 	}}
 	orchestrator.Tick(context.Background())
@@ -338,8 +328,8 @@ func TestFailedTransfersFailTheWant(t *testing.T) {
 	search.Responses = []slskd.Response{{
 		Username: "peer",
 		Files: []slskd.File{
-			{Filename: `dir\SAETIA\01.flac`, Size: 9},
-			{Filename: `dir\SAETIA\02.flac`, Size: 19},
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
 		},
 	}}
 	orchestrator.Tick(context.Background())
@@ -347,8 +337,8 @@ func TestFailedTransfersFailTheWant(t *testing.T) {
 	slskdFake.downloads = []slskd.UserResponse{{
 		Username: "peer",
 		Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
-			{ID: "t1", Filename: `dir\SAETIA\01.flac`, Size: 9, State: "Completed, Succeeded"},
-			{ID: "t2", Filename: `dir\SAETIA\02.flac`, Size: 19, State: "Completed, Errored",
+			{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+			{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Errored",
 				Exception: strPtr("peer disconnected")},
 		}}},
 	}}
@@ -364,10 +354,7 @@ func TestFailedTransfersFailTheWant(t *testing.T) {
 
 func TestNoResultsFailsTheWant(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{resolve: api.ResolveResponse{
-		Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 1, TitleSim: 1, ArtistSim: 1}},
-		Auto:       true,
-	}}
+	katydFake := autoTitlesResolver("vault")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("obscure", "nothing", 0, "")
 	orchestrator.Tick(context.Background())
@@ -425,15 +412,10 @@ func (f *fakeKatyd) RecordedResult(request string) (importer.Result, bool) {
 
 func TestWantsInNeedsPickReconcileExternalDecision(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{
-		resolve: api.ResolveResponse{
-			Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 1, TitleSim: 1, ArtistSim: 1}},
-			Auto:       true,
-		},
-		importResult: importer.Result{Status: "needs_decision", Decision: &importer.Decision{
-			Token: "tok-1", Candidates: []match.Candidate{{ReleaseID: "r1"}},
-		}},
-	}
+	katydFake := autoTitlesResolver("vault")
+	katydFake.importResult = importer.Result{Status: "needs_decision", Decision: &importer.Decision{
+		Token: "tok-1", Candidates: []match.Candidate{{ReleaseID: "r1"}},
+	}}
 	orchestrator, root := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
 	orchestrator.Tick(context.Background())
@@ -442,16 +424,16 @@ func TestWantsInNeedsPickReconcileExternalDecision(t *testing.T) {
 	search.IsComplete = true
 	search.Responses = []slskd.Response{{
 		Username: "peer",
-		Files:    []slskd.File{{Filename: `dir\SAETIA\01.flac`, Size: 9}},
+		Files:    []slskd.File{{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9}},
 	}}
 	orchestrator.Tick(context.Background())
 	localDir := filepath.Join(root, "downloads", "SAETIA")
 	os.MkdirAll(localDir, 0o755)
-	os.WriteFile(filepath.Join(localDir, "01.flac"), make([]byte, 9), 0o644)
+	os.WriteFile(filepath.Join(localDir, "01 - vault.flac"), make([]byte, 9), 0o644)
 	slskdFake.downloads = []slskd.UserResponse{{
 		Username: "peer",
 		Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{{
-			ID: "t1", Filename: `dir\SAETIA\01.flac`, Size: 9, State: "Completed, Succeeded",
+			ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded",
 		}}}},
 	}}
 	orchestrator.Tick(context.Background())
@@ -473,12 +455,7 @@ func TestWantsInNeedsPickReconcileExternalDecision(t *testing.T) {
 
 func TestFailedTransfersAreReenqueued(t *testing.T) {
 	slskdFake := newFakeSlskd()
-	katydFake := &fakeKatyd{
-		resolve: api.ResolveResponse{
-			Candidates: []match.Candidate{{ReleaseID: "r1", TrackCount: 2, TitleSim: 1, ArtistSim: 1}},
-			Auto:       true,
-		},
-	}
+	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
 	want, _ := orchestrator.Add("saetia", "saetia", 0, "")
 	orchestrator.Tick(context.Background())
@@ -488,8 +465,8 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 	search.Responses = []slskd.Response{{
 		Username: "peer",
 		Files: []slskd.File{
-			{Filename: `dir\SAETIA\01.flac`, Size: 9},
-			{Filename: `dir\SAETIA\02.flac`, Size: 19},
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
 		},
 	}}
 	orchestrator.Tick(context.Background())
@@ -497,8 +474,8 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 	slskdFake.downloads = []slskd.UserResponse{{
 		Username: "peer",
 		Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
-			{ID: "t1", Filename: `dir\SAETIA\01.flac`, Size: 9, State: "Completed, Succeeded"},
-			{ID: "t2", Filename: `dir\SAETIA\02.flac`, Size: 19, State: "Completed, Errored",
+			{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+			{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Errored",
 				Exception: strPtr("Too many files")},
 		}}},
 	}}
@@ -511,14 +488,19 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 		t.Fatalf("failed file should be re-enqueued: %d enqueues", len(slskdFake.enqueuedSeq)-before)
 	}
 	cumulative := slskdFake.enqueued["peer"]
-	if len(cumulative) != 3 || cumulative[2].Filename != `dir\SAETIA\02.flac` {
+	if len(cumulative) != 3 || cumulative[2].Filename != `dir\SAETIA\02 - orbit.flac` {
 		t.Fatalf("last enqueue should be only the failed file: %+v", cumulative)
 	}
 }
 
 func autoTitlesResolver(titles ...string) *fakeKatyd {
-	candidates := []match.Candidate{{ReleaseID: "r1", TrackCount: len(titles), TitleSim: 1, ArtistSim: 1, TrackTitles: titles}}
-	return &fakeKatyd{resolve: api.ResolveResponse{Candidates: candidates, Auto: true}}
+	groups := []match.Candidate{{ReleaseID: "rg-1", TitleSim: 1, ArtistSim: 1}}
+	releases := []match.Candidate{{ReleaseID: "r1", TrackCount: len(titles), TitleSim: 1, ArtistSim: 1, TrackTitles: titles}}
+	return &fakeKatyd{
+		resolve:         api.ResolveResponse{Candidates: groups, Auto: true},
+		resolveGroup:    api.ResolveResponse{Candidates: releases, Auto: true},
+		resolveGroupFor: "rg-1",
+	}
 }
 
 func startDownloadWanted(t *testing.T, slskdFake *fakeSlskd, katydFake *fakeKatyd) (fetch.Want, string) {
@@ -629,4 +611,11 @@ func TestSplitMultiDiscDirectoriesPoolTogether(t *testing.T) {
 	if len(found.Enqueued) != 4 {
 		t.Fatalf("enqueued %d, want 4", len(found.Enqueued))
 	}
+}
+
+func (f *fakeKatyd) ResolveGroup(group string) (api.ResolveResponse, error) {
+	if len(f.resolveGroup.Candidates) > 0 && group == f.resolveGroupFor {
+		return f.resolveGroup, nil
+	}
+	return api.ResolveResponse{}, errors.New("no such group fixture")
 }

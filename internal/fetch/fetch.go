@@ -51,6 +51,7 @@ type Want struct {
 	MBID        string    `json:"mbid,omitempty"`
 	TrackCount  int       `json:"track_count,omitempty"`
 	TrackTitles []string  `json:"track_titles,omitempty"`
+	GroupID     string    `json:"group_id,omitempty"`
 	State       string    `json:"state"`
 	Error       string    `json:"error,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -70,6 +71,7 @@ type Want struct {
 // Katyd is the slice of the katyd client the orchestrator needs.
 type Katyd interface {
 	Resolve(artist, album string, year int, mbid string) (api.ResolveResponse, error)
+	ResolveGroup(group string) (api.ResolveResponse, error)
 	Import(req importer.Request) (importer.Result, error)
 	Decide(token string, in importer.DecideInput) (importer.Result, error)
 	RecordedResult(request string) (importer.Result, bool)
@@ -232,13 +234,19 @@ func (o *Orchestrator) Decide(ctx context.Context, id string, pick int, skip boo
 		if pick < 1 || pick > len(want.Candidates) {
 			return Want{}, fmt.Errorf("pick %d out of range 1..%d", pick, len(want.Candidates))
 		}
-		want.TrackCount = want.Candidates[pick-1].TrackCount
-		// titles let the source picker verify coverage before downloading
-		if refreshed, err := o.cfg.Katyd.Resolve(want.Artist, want.Album, want.Year, want.Candidates[pick-1].ReleaseID); err == nil && len(refreshed.Candidates) > 0 {
-			want.TrackTitles = refreshed.Candidates[0].TrackTitles
-		}
+		// the picked candidate is a release group; resolve it to its
+		// oldest release before searching
+		want.GroupID = want.Candidates[pick-1].ReleaseID
 		want.Candidates = nil
-		return o.beginSearchLocked(ctx, want)
+		if err := o.applyGroupRelease(ctx, &want); err != nil {
+			want.State = StateFailed
+			want.Error = err.Error()
+		}
+		o.store.put(want)
+		if err := o.store.Save(); err != nil {
+			return Want{}, err
+		}
+		return want, nil
 	case StateNeedsPick:
 		result, err := o.cfg.Katyd.Decide(want.DecisionToken, importer.DecideInput{Pick: pick, Skip: skip})
 		if err != nil {
@@ -314,16 +322,40 @@ func (o *Orchestrator) resolve(ctx context.Context, want Want) {
 		if len(response.Candidates) == 0 {
 			return errors.New("no musicbrainz candidates")
 		}
-		if response.Auto {
+		if want.MBID != "" {
+			// an exact release was requested; nothing to disambiguate
+			w.GroupID = response.Candidates[0].GroupID
 			w.TrackCount = response.Candidates[0].TrackCount
 			w.TrackTitles = response.Candidates[0].TrackTitles
 			w.Candidates = nil
 			return o.beginSearch(ctx, w)
 		}
+		if response.Auto {
+			// the top release group is trusted; default to its oldest
+			// release (remasters and deluxes want an explicit mbid)
+			w.GroupID = response.Candidates[0].ReleaseID
+			return o.applyGroupRelease(ctx, w)
+		}
 		w.Candidates = response.Candidates
 		w.State = StateNeedsRelease
 		return nil
 	})
+}
+
+// applyGroupRelease resolves the chosen release group to its oldest
+// release and stores its shape for the source picker.
+func (o *Orchestrator) applyGroupRelease(ctx context.Context, w *Want) error {
+	releases, err := o.cfg.Katyd.ResolveGroup(w.GroupID)
+	if err != nil {
+		return fmt.Errorf("resolve group: %w", err)
+	}
+	if len(releases.Candidates) == 0 {
+		return fmt.Errorf("release group %s has no releases", w.GroupID)
+	}
+	w.TrackCount = releases.Candidates[0].TrackCount
+	w.TrackTitles = releases.Candidates[0].TrackTitles
+	w.Candidates = nil
+	return o.beginSearch(ctx, w)
 }
 
 func (o *Orchestrator) beginSearchLocked(ctx context.Context, want Want) (Want, error) {

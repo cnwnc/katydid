@@ -461,3 +461,41 @@ func (c *Client) cachePath(requestURL string) string {
 func CreditName(credits []ArtistCredit) string {
 	return creditName(credits)
 }
+
+// SearchReleaseGroup is one musicbrainz release group search hit.
+type SearchReleaseGroup struct {
+	ID               string         `json:"id"`
+	Score            int            `json:"score"`
+	Title            string         `json:"title"`
+	FirstReleaseDate string         `json:"first-release-date"`
+	PrimaryType      string         `json:"primary-type"`
+	SecondaryTypes   []string       `json:"secondary-types"`
+	ArtistCredit     []ArtistCredit `json:"artist-credit"`
+}
+
+func (g *SearchReleaseGroup) Artist() string {
+	return creditName(g.ArtistCredit)
+}
+
+// BuildGroupQuery builds a release-group search for artist and group title.
+func BuildGroupQuery(artist, album string) string {
+	return fmt.Sprintf("artist:%s AND releasegroup:%s", quoteTerm(artist), quoteTerm(album))
+}
+
+// SearchReleaseGroups searches musicbrainz release groups by name.
+func (c *Client) SearchReleaseGroups(ctx context.Context, query string) ([]SearchReleaseGroup, error) {
+	path := "/ws/2/release-group?query=" + url.QueryEscape(query) + "&fmt=json&limit=25"
+	var out struct {
+		ReleaseGroups []SearchReleaseGroup `json:"release-groups"`
+	}
+	if err := c.get(ctx, path, &out); err != nil {
+		return nil, fmt.Errorf("search release groups: %w", err)
+	}
+	return out.ReleaseGroups, nil
+}
+
+// GroupReleases lists the releases of a release group via the rgid
+// release-search field, which returns full release records with media.
+func (c *Client) GroupReleases(ctx context.Context, groupID string) ([]SearchRelease, error) {
+	return c.SearchReleases(ctx, "rgid:"+groupID)
+}

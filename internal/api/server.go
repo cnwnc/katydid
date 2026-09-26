@@ -233,6 +233,7 @@ func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
 	artist := r.URL.Query().Get("artist")
 	album := r.URL.Query().Get("album")
 	mbid := r.URL.Query().Get("mbid")
+	group := r.URL.Query().Get("group")
 	year := 0
 	if raw := r.URL.Query().Get("year"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -242,12 +243,14 @@ func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
 		}
 		year = parsed
 	}
-	candidates, err := s.Import.Resolve(r.Context(), artist, album, year, mbid)
+	candidates, err := s.Import.Resolve(r.Context(), artist, album, year, mbid, group)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	auto := len(candidates) > 0 && match.SpecifierAuto(candidates[0], year)
+	// a group query means the group is already trusted; any release
+	// list is an auto answer (the top is the oldest)
+	auto := len(candidates) > 0 && (group != "" || match.SpecifierAuto(candidates[0], year))
 	writeJSON(w, http.StatusOK, ResolveResponse{Candidates: candidates, Auto: auto})
 }
 

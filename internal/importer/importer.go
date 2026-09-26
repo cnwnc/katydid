@@ -377,40 +377,92 @@ func buildRemap(pick int, ordered []sourceFile, release *mb.Release, pairing map
 // Resolve ranks musicbrainz candidates for a bare specifier (no files). Used
 // by the fetcher to choose what to search soulseek for; the import gate runs
 // later with real evidence.
-func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, mbid string) ([]match.Candidate, error) {
-	if artist == "" || album == "" {
+// Resolve ranks musicbrainz candidates for a bare specifier (no files).
+// Fuzzy specifiers resolve release GROUPS (an album and its single share
+// a title; the type tiebreak separates them); groupID resolves the
+// releases inside one group; mbid pins an exact release.
+func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, mbid string, groupID string) ([]match.Candidate, error) {
+	if mbid == "" && groupID == "" && (artist == "" || album == "") {
 		return nil, errors.New("artist and album are required")
 	}
+	evidence := match.Evidence{Artist: artist, Album: album, Year: year}
+
 	if mbid != "" {
 		release, err := m.mb.LookupRelease(ctx, mbid)
 		if err != nil {
 			return nil, err
 		}
-		evidence := match.Evidence{Artist: artist, Album: album, Year: year}
 		ranked := match.Rank(evidence, []mb.SearchRelease{searchFromRelease(release)})
 		if len(ranked) > 0 {
 			ranked[0].TrackTitles = releaseTrackTitles(release)
 		}
 		return ranked, nil
 	}
-	releases, err := m.mb.SearchReleases(ctx, mb.BuildQuery(artist, album))
+
+	if groupID != "" {
+		return m.resolveGroup(ctx, evidence, groupID)
+	}
+
+	groups, err := m.mb.SearchReleaseGroups(ctx, mb.BuildGroupQuery(artist, album))
 	if err != nil {
 		return nil, err
 	}
-	evidence := match.Evidence{Artist: artist, Album: album, Year: year}
-	ranked := match.Rank(evidence, releases)
+	hits := make([]mb.SearchRelease, 0, len(groups))
+	for _, group := range groups {
+		hits = append(hits, groupToSearch(group))
+	}
+	ranked := match.Rank(evidence, hits)
 	const maxCandidates = 5
 	if len(ranked) > maxCandidates {
 		ranked = ranked[:maxCandidates]
 	}
-	// the fetcher verifies soulseek results against the release track
-	// list, so the top candidate carries its titles (best effort)
-	if len(ranked) > 0 {
-		if release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID); err == nil {
-			ranked[0].TrackTitles = releaseTrackTitles(release)
+	return ranked, nil
+}
+
+// resolveGroup ranks a group's releases; the group is already trusted,
+// so the release list is only ordered (oldest first, then format).
+func (m *Manager) resolveGroup(ctx context.Context, evidence match.Evidence, groupID string) ([]match.Candidate, error) {
+	releases, err := m.mb.GroupReleases(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]mb.SearchRelease, 0, len(releases))
+	for _, release := range releases {
+		if release.Status == "Bootleg" || release.Status == "Promotion" {
+			continue
 		}
+		release.ReleaseGroup = nil
+		kept = append(kept, release)
+	}
+	ranked := match.Rank(evidence, kept)
+	if len(ranked) == 0 {
+		return nil, fmt.Errorf("release group %s has no usable releases", groupID)
+	}
+	ranked[0].GroupID = groupID
+	// the fetcher verifies soulseek results against the release track
+	// list, so the chosen release carries its titles (best effort)
+	if release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID); err == nil {
+		ranked[0].TrackTitles = releaseTrackTitles(release)
 	}
 	return ranked, nil
+}
+
+// groupToSearch adapts a release group hit to the release-shaped
+// candidate scorer; the group id doubles as the candidate id.
+func groupToSearch(group mb.SearchReleaseGroup) mb.SearchRelease {
+	search := mb.SearchRelease{
+		ID:           group.ID,
+		Score:        group.Score,
+		Title:        group.Title,
+		Date:         group.FirstReleaseDate,
+		ArtistCredit: group.ArtistCredit,
+	}
+	search.ReleaseGroup = &struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		PrimaryType string `json:"primary-type"`
+	}{ID: group.ID, Title: group.Title, PrimaryType: group.PrimaryType}
+	return search
 }
 
 // releaseTrackTitles lists a release track titles in release order.

@@ -179,3 +179,10 @@ func (c *Client) RecordedResult(request string) (importer.Result, bool) {
 	}
 	return out.Result, out.Found
 }
+
+// ResolveGroup ranks the releases of a release group; the top is the
+// oldest, which the fetcher defaults to.
+func (c *Client) ResolveGroup(group string) (api.ResolveResponse, error) {
+	var out api.ResolveResponse
+	return out, c.get("/resolve?group="+url.QueryEscape(group), &out)
+}

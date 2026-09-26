@@ -52,6 +52,7 @@ type Candidate struct {
 	TrackCount    int      `json:"track_count"`
 	TrackTitles   []string `json:"track_titles,omitempty"`
 	Formats       []string `json:"formats,omitempty"`
+	PrimaryType   string   `json:"primary_type,omitempty"`
 	Score         float64  `json:"score"`
 	TitleSim      float64  `json:"title_sim"`
 	ArtistSim     float64  `json:"artist_sim"`
@@ -126,6 +127,10 @@ func betterCandidate(a, b Candidate) bool {
 	if a.Date != b.Date {
 		return a.Date < b.Date
 	}
+	ta, tb := typeRank(a.PrimaryType), typeRank(b.PrimaryType)
+	if ta != tb {
+		return ta < tb
+	}
 	pa, pb := bestFormatPriority(a.Formats), bestFormatPriority(b.Formats)
 	if pa != pb {
 		return pa < pb
@@ -192,6 +197,7 @@ func scoreCandidate(ev Evidence, release mb.SearchRelease) Candidate {
 		Artist:        release.Artist(),
 		Date:          release.Date,
 		TrackCount:    release.TrackCount,
+		PrimaryType:   primaryType(release),
 		Formats:       DistinctFormats(release.Media),
 		TitleSim:      titleSim,
 		ArtistSim:     artistSim,
@@ -350,4 +356,28 @@ func mapValues[V any](m map[string]V) []V {
 		out = append(out, v)
 	}
 	return out
+}
+
+// primaryType returns the release group primary type of a search hit.
+func primaryType(release mb.SearchRelease) string {
+	if release.ReleaseGroup != nil {
+		return release.ReleaseGroup.PrimaryType
+	}
+	return ""
+}
+
+// typeRank orders release group types for disambiguation: albums over
+// eps over singles; unknown types rank last. Same-named groups (an
+// album and its single share a title) separate here.
+func typeRank(primaryType string) int {
+	switch strings.ToLower(primaryType) {
+	case "album":
+		return 0
+	case "ep":
+		return 1
+	case "single":
+		return 2
+	default:
+		return 3
+	}
 }

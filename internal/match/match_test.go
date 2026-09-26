@@ -274,3 +274,26 @@ func syntheticWithMedia(id, _, title, artist, date string, trackCount int, forma
 	release.Media = []mb.ReleaseMedia{{Position: 1, Format: format, TrackCount: trackCount}}
 	return release
 }
+
+func TestRankGroupTypeBreaksTie(t *testing.T) {
+	// an album and its single share title, artist, and year; only the
+	// primary type separates them
+	releases := []mb.SearchRelease{
+		syntheticTyped("rg-single", "Single"),
+		syntheticTyped("rg-album", "Album"),
+	}
+	ranked := Rank(Evidence{Artist: "Artist", Album: "Album"}, releases)
+	if ranked[0].ReleaseID != "rg-album" {
+		t.Fatalf("top group = %s, want the album", ranked[0].ReleaseID)
+	}
+}
+
+func syntheticTyped(id, primaryType string) mb.SearchRelease {
+	release := mbtest.SyntheticSearch(id, id, "Album", "Artist", "1986", 0)
+	release.ReleaseGroup = &struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		PrimaryType string `json:"primary-type"`
+	}{ID: id, Title: "Album", PrimaryType: primaryType}
+	return release
+}

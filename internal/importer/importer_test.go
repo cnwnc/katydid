@@ -903,3 +903,83 @@ func TestDecideRemapStealsTrack(t *testing.T) {
 		t.Errorf("drop note should name Intro.1.flac: %+v", accepted.Notes)
 	}
 }
+
+func TestResolveGroupFlow(t *testing.T) {
+	startMB(t, mbFixture{
+		search: []mb.SearchRelease{
+			mbtest.SyntheticSearch("rg-single", "rg-single", "Test Album", "Test Artist", "2001", 2),
+			mbtest.SyntheticSearch("rg-album", "rg-album", "Test Album", "Test Artist", "2001", 10),
+		},
+		releases: []mb.Release{
+			mbtest.SyntheticRelease("rel-orig", "rg-album", "Test Album", "Test Artist", "2001",
+				mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+					mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+				}}),
+		},
+	})
+	// group search goes through the same /ws/2/release-group path; the
+	// fixture server only handles /ws/2/release, so patch the handler via
+	// a dedicated server below instead
+	_ = startMB
+	server := mbtest.Custom(t, func(r *http.Request) (string, int) {
+		if strings.HasPrefix(r.URL.Path, "/ws/2/release-group") {
+			return groupSearchBody(), http.StatusOK
+		}
+		if strings.Contains(r.URL.RawQuery, "rgid%3Arg-album") {
+			return searchBody([]mb.SearchRelease{
+				mbtest.SyntheticSearch("rel-remaster", "rg-album", "Test Album", "Test Artist", "2011-01-01", 2),
+				mbtest.SyntheticSearch("rel-orig", "rg-album", "Test Album", "Test Artist", "2001", 2),
+			}...), http.StatusOK
+		}
+		if id, ok := strings.CutPrefix(r.URL.Path, "/ws/2/release/"); ok {
+			for _, release := range []mb.Release{
+				mbtest.SyntheticRelease("rel-orig", "rg-album", "Test Album", "Test Artist", "2001",
+					mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+						mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+					}}),
+			} {
+				if release.ID == id {
+					return lookupBody(release), http.StatusOK
+				}
+			}
+		}
+		return `{"error": "no fixture"}`, http.StatusNotFound
+	})
+	mbBase = server.URL
+	manager := newManager(t, t.TempDir())
+
+	// fuzzy specifier: group candidates, album type outranks single
+	groups, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "")
+	if err != nil {
+		t.Fatalf("resolve groups: %v", err)
+	}
+	if len(groups) == 0 {
+		t.Fatalf("no group candidates")
+	}
+	if groups[0].ReleaseID != "rg-album" {
+		t.Errorf("top group = %s, want rg-album (type tiebreak)", groups[0].ReleaseID)
+	}
+
+	// group pick: releases ranked oldest first, titles carried
+	releases, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "rg-album")
+	if err != nil {
+		t.Fatalf("resolve group: %v", err)
+	}
+	if len(releases) == 0 || releases[0].ReleaseID != "rel-orig" {
+		t.Fatalf("top release = %+v, want rel-orig (oldest)", releases)
+	}
+	if len(releases[0].TrackTitles) != 2 || releases[0].TrackTitles[0] != "First Song" {
+		t.Errorf("track titles: %+v", releases[0].TrackTitles)
+	}
+}
+
+func groupSearchBody() string {
+	groups := []mb.SearchReleaseGroup{
+		{ID: "rg-single", Score: 100, Title: "Test Album", FirstReleaseDate: "2001", PrimaryType: "Single",
+			ArtistCredit: []mb.ArtistCredit{{Name: "Test Artist"}}},
+		{ID: "rg-album", Score: 100, Title: "Test Album", FirstReleaseDate: "2001", PrimaryType: "Album",
+			ArtistCredit: []mb.ArtistCredit{{Name: "Test Artist"}}},
+	}
+	data, _ := json.Marshal(map[string]any{"release-groups": groups})
+	return string(data)
+}
