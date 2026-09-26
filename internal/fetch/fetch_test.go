@@ -12,6 +12,7 @@ import (
 	"doppel.moe/katydid/internal/api"
 	"doppel.moe/katydid/internal/fetch"
 	"doppel.moe/katydid/internal/importer"
+	"doppel.moe/katydid/internal/library"
 	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/slskd"
 )
@@ -71,11 +72,16 @@ type fakeKatyd struct {
 	recorded        map[string]importer.Result
 	resolveGroup    api.ResolveResponse
 	resolveGroupFor string
+	albums          api.AlbumsResponse
 }
 
 func (f *fakeKatyd) Resolve(_ string, _ string, _ int, _ string) (api.ResolveResponse, error) {
 	f.resolves++
 	return f.resolve, f.resolveErr
+}
+
+func (f *fakeKatyd) Albums(_ library.Query) (api.AlbumsResponse, error) {
+	return f.albums, nil
 }
 
 func (f *fakeKatyd) Import(req importer.Request) (importer.Result, error) {
@@ -130,6 +136,28 @@ func TestQueuedToSearchingOnAutoResolve(t *testing.T) {
 	}
 	if len(slskdFake.searches) != 1 {
 		t.Fatalf("searches = %d, want 1", len(slskdFake.searches))
+	}
+}
+
+func TestWantAlreadyInLibrarySkipsFetch(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	katydFake.albums = api.AlbumsResponse{Albums: []library.Album{{
+		ID:   "Saetia/1998 - Saetia",
+		Meta: library.Meta{ReleaseID: "r1"},
+	}}}
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saeita", Album: "saeita", Year: 0, GroupID: "rg-1"})
+	orchestrator.Tick(context.Background())
+	got := find(t, orchestrator, want.ID)
+	if got.State != fetch.StateImported || got.AlbumID != "Saetia/1998 - Saetia" {
+		t.Fatalf("state %q album %q err %q, want imported without fetching", got.State, got.AlbumID, got.Error)
+	}
+	if len(slskdFake.enqueuedSeq) != 0 {
+		t.Fatalf("nothing should be downloaded: %+v", slskdFake.enqueuedSeq)
+	}
+	if len(got.Notes) == 0 || !strings.Contains(got.Notes[0], "already in the library") {
+		t.Fatalf("notes should explain the skip: %+v", got.Notes)
 	}
 }
 
