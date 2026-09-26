@@ -130,6 +130,7 @@ func (b *Bot) onAddAlbum(s *discordgo.Session, i *discordgo.InteractionCreate, s
 		b.editOriginal(s, i.Interaction, err.Error())
 		return
 	}
+	spec.Candidates = candidates
 	switch {
 	case len(candidates) == 0:
 		b.editOriginal(s, i.Interaction, fmt.Sprintf("No matches for %s - %s.", spec.Artist, spec.Album))
@@ -256,6 +257,8 @@ func (b *Bot) onExpand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		b.updateMessage(s, i, err.Error(), nil)
 		return
 	}
+	spec.Candidates = candidates
+	b.trackPending(i.Message.ID, spec)
 	b.updateMessage(s, i, choicesText(spec, len(candidates)), menuComponents(candidates, maxMenuSize))
 }
 
@@ -282,6 +285,9 @@ func (b *Bot) onPick(s *discordgo.Session, i *discordgo.InteractionCreate, relea
 	add := AddWant{Artist: spec.Artist, Album: spec.Album, Year: spec.Year, Group: releaseID}
 	if spec.MBID != "" {
 		add.MBID, add.Group = releaseID, ""
+	}
+	if c, ok := candidateFor(spec, releaseID); ok {
+		add.ReleaseArtist, add.ReleaseTitle = c.Artist, c.Title
 	}
 	want, err := b.fetchd.Add(add)
 	if err != nil {

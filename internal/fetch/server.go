@@ -10,11 +10,13 @@ type Server struct {
 }
 
 type addRequest struct {
-	Artist string
-	Album  string
-	Year   int
-	MBID   string
-	Group  string
+	Artist        string `json:"artist"`
+	Album         string `json:"album"`
+	Year          int    `json:"year"`
+	MBID          string `json:"mbid"`
+	Group         string `json:"group"`
+	ReleaseArtist string `json:"release_artist"`
+	ReleaseTitle  string `json:"release_title"`
 }
 
 type decideRequest struct {
@@ -82,7 +84,15 @@ func (s *Server) add(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "decode request body: "+err.Error())
 		return
 	}
-	want, err := s.Orchestrator.Add(req.Artist, req.Album, req.Year, req.MBID, req.Group)
+	want, err := s.Orchestrator.Add(Spec{
+		Artist:        req.Artist,
+		Album:         req.Album,
+		Year:          req.Year,
+		MBID:          req.MBID,
+		GroupID:       req.Group,
+		ReleaseArtist: req.ReleaseArtist,
+		ReleaseTitle:  req.ReleaseTitle,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

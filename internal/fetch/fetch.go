@@ -184,25 +184,40 @@ func New(store *Store, cfg Config) *Orchestrator {
 	return &Orchestrator{store: store, cfg: cfg}
 }
 
-// Add records a new want. A non-empty groupID pins the release group and
+// Spec queues what to fetch: the typed specifier as entered, plus the
+// musicbrainz names and a pinned group or release when the caller (the
+// bot) already resolved them.
+type Spec struct {
+	Artist        string
+	Album         string
+	Year          int
+	MBID          string
+	GroupID       string
+	ReleaseArtist string
+	ReleaseTitle  string
+}
+
+// Add records a new want. A non-empty GroupID pins the release group and
 // skips the group search. Resolution happens on the next tick.
-func (o *Orchestrator) Add(artist, album string, year int, mbid string, groupID string) (Want, error) {
-	if artist == "" || album == "" {
+func (o *Orchestrator) Add(spec Spec) (Want, error) {
+	if spec.Artist == "" || spec.Album == "" {
 		return Want{}, errors.New("artist and album are required")
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	now := time.Now().UTC()
 	want := Want{
-		ID:        newID(),
-		Artist:    artist,
-		Album:     album,
-		Year:      year,
-		MBID:      mbid,
-		GroupID:   groupID,
-		State:     StateQueued,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            newID(),
+		Artist:        spec.Artist,
+		Album:         spec.Album,
+		Year:          spec.Year,
+		MBID:          spec.MBID,
+		GroupID:       spec.GroupID,
+		ReleaseArtist: spec.ReleaseArtist,
+		ReleaseTitle:  spec.ReleaseTitle,
+		State:         StateQueued,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	o.store.Want.Wants = append(o.store.Want.Wants, want)
 	if err := o.store.Save(); err != nil {

@@ -8,6 +8,9 @@ type addSpec struct {
 	Year      int
 	MBID      string
 	Ephemeral bool
+	// Candidates holds the resolve results behind this prompt so a pick
+	// can seed the want with musicbrainz names before fetchd resolves.
+	Candidates []Candidate
 }
 
 func parseAddSpec(data discordgo.ApplicationCommandInteractionData) addSpec {

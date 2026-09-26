@@ -116,7 +116,7 @@ func TestQueuedToSearchingOnAutoResolve(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, err := orchestrator.Add("saetia", "saetia", 1998, "", "")
+	want, err := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 1998, GroupID: ""})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestResolvedNamesRecordedTypedKept(t *testing.T) {
 	katydFake.resolveGroup.Candidates[0].Artist = "Saetia"
 	katydFake.resolveGroup.Candidates[0].Title = "Saetia"
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saeita", "saeita", 0, "", "rg-1")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saeita", Album: "saeita", Year: 0, GroupID: "rg-1"})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	if want.ReleaseArtist != "Saetia" || want.ReleaseTitle != "Saetia" {
@@ -154,7 +154,7 @@ func TestPinnedGroupSkipsGroupSearch(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, err := orchestrator.Add("saetia", "saetia", 0, "", "rg-1")
+	want, err := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: "rg-1"})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestLowConfidenceGatesOnReleasePick(t *testing.T) {
 		resolveGroupFor: "r2",
 	}
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("drukqs", "drukqs", 2001, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "drukqs", Album: "drukqs", Year: 2001, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	if want.State != fetch.StateNeedsRelease {
@@ -216,7 +216,7 @@ func TestSearchToDownloadPicksBestDirectory(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	searchID := want.SearchID
@@ -259,7 +259,7 @@ func TestDownloadToImportHappyPath(t *testing.T) {
 	katydFake := autoTitlesResolver("vault")
 	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "saetia_saetia_1998"}
 	orchestrator, root := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	search := slskdFake.searches[want.SearchID]
@@ -312,7 +312,7 @@ func TestImportNeedingDecisionPassthrough(t *testing.T) {
 	}}
 	katydFake.decideResult = importer.Result{Status: "imported", AlbumID: "picked"}
 	orchestrator, root := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	search := slskdFake.searches[want.SearchID]
@@ -364,7 +364,7 @@ func TestFailedTransfersFailTheWant(t *testing.T) {
 		},
 	}
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	search := slskdFake.searches[want.SearchID]
@@ -400,7 +400,7 @@ func TestNoResultsFailsTheWant(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("obscure", "nothing", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "obscure", Album: "nothing", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	slskdFake.searches[want.SearchID].IsComplete = true
@@ -419,7 +419,7 @@ func TestStoreRoundTripAndCorruption(t *testing.T) {
 		t.Fatalf("fresh store: %v", err)
 	}
 	orchestrator := fetch.New(store, fetch.Config{})
-	if _, err := orchestrator.Add("a", "b", 1999, "", ""); err != nil {
+	if _, err := orchestrator.Add(fetch.Spec{Artist: "a", Album: "b", Year: 1999, GroupID: ""}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	reopened, err := fetch.OpenStore(path)
@@ -439,7 +439,7 @@ func TestStoreRoundTripAndCorruption(t *testing.T) {
 
 func TestAddValidation(t *testing.T) {
 	orchestrator, _ := harness(t, newFakeSlskd(), &fakeKatyd{})
-	if _, err := orchestrator.Add("", "x", 0, "", ""); err == nil {
+	if _, err := orchestrator.Add(fetch.Spec{Artist: "", Album: "x", Year: 0, GroupID: ""}); err == nil {
 		t.Fatalf("empty artist must fail")
 	}
 }
@@ -461,7 +461,7 @@ func TestWantsInNeedsPickReconcileExternalDecision(t *testing.T) {
 		Token: "tok-1", Candidates: []match.Candidate{{ReleaseID: "r1"}},
 	}}
 	orchestrator, root := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	search := slskdFake.searches[want.SearchID]
@@ -501,7 +501,7 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	search := slskdFake.searches[want.SearchID]
@@ -543,7 +543,7 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 func twoPeerWant(t *testing.T, slskdFake *fakeSlskd) (*fetch.Orchestrator, fetch.Want) {
 	t.Helper()
 	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"))
-	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
 	search := slskdFake.searches[want.SearchID]
@@ -659,7 +659,7 @@ func autoTitlesResolver(titles ...string) *fakeKatyd {
 func startDownloadWanted(t *testing.T, slskdFake *fakeSlskd, katydFake *fakeKatyd) (fetch.Want, string) {
 	t.Helper()
 	orchestrator, root := harness(t, slskdFake, katydFake)
-	want, err := orchestrator.Add("metallica", "master of puppets", 1986, "", "")
+	want, err := orchestrator.Add(fetch.Spec{Artist: "metallica", Album: "master of puppets", Year: 1986, GroupID: ""})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -674,7 +674,7 @@ func TestSingleIsRejectedForLowCoverage(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("Battery", "Master of Puppets", "The Thing That Should Not Be", "Orion")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("metallica", "master of puppets", 1986, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "metallica", Album: "master of puppets", Year: 1986, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	found := find(t, orchestrator, want.ID)
 	search := slskdFake.searches[found.SearchID]
@@ -701,7 +701,7 @@ func TestBestCoveragePeerWinsAndOnlyMatchedFilesEnqueue(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("Battery", "Master of Puppets", "The Thing That Should Not Be", "Orion")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("metallica", "master of puppets", 1986, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "metallica", Album: "master of puppets", Year: 1986, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	found := find(t, orchestrator, want.ID)
 	search := slskdFake.searches[found.SearchID]
@@ -742,7 +742,7 @@ func TestSplitMultiDiscDirectoriesPoolTogether(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("CD1 A", "CD1 B", "CD2 C", "CD2 D")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
-	want, _ := orchestrator.Add("someartist", "somealbum", 0, "", "")
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "someartist", Album: "somealbum", Year: 0, GroupID: ""})
 	orchestrator.Tick(context.Background())
 	found := find(t, orchestrator, want.ID)
 	search := slskdFake.searches[found.SearchID]

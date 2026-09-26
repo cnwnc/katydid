@@ -40,6 +40,17 @@ func menuOptions(candidates []Candidate, limit int) []discordgo.SelectMenuOption
 	return options
 }
 
+// candidateFor finds the picked candidate so the want can carry
+// musicbrainz names from the moment it is queued.
+func candidateFor(spec addSpec, releaseID string) (Candidate, bool) {
+	for _, c := range spec.Candidates {
+		if c.ReleaseID == releaseID {
+			return c, true
+		}
+	}
+	return Candidate{}, false
+}
+
 func candidateDetail(c Candidate) string {
 	parts := []string{}
 	if c.Date != "" {

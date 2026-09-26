@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestCandidateFor(t *testing.T) {
+	spec := addSpec{Candidates: []Candidate{{ReleaseID: "g1", Title: "T", Artist: "A"}}}
+	c, ok := candidateFor(spec, "g1")
+	if !ok || c.Title != "T" {
+		t.Fatalf("candidateFor = %+v ok %v", c, ok)
+	}
+	if _, ok := candidateFor(spec, "g2"); ok {
+		t.Fatalf("unknown id should miss")
+	}
+	if _, ok := candidateFor(addSpec{}, "g1"); ok {
+		t.Fatalf("empty spec should miss")
+	}
+}
+
 func TestMenuOptionsTruncatesLabel(t *testing.T) {
 	long := strings.Repeat("t", 120)
 	options := menuOptions([]Candidate{{ReleaseID: "grp-1", Title: long, Artist: "A", Date: "1969-09-26", TrackCount: 17, PrimaryType: "Album"}}, 8)

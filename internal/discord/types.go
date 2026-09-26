@@ -74,10 +74,14 @@ type Query struct {
 }
 
 // AddWant is the fetchd POST /wants body. MBID and Group are mutually exclusive.
+// ReleaseArtist and ReleaseTitle seed the display names when the caller
+// already resolved the candidate.
 type AddWant struct {
-	Artist string `json:"artist"`
-	Album  string `json:"album"`
-	Year   int    `json:"year,omitempty"`
-	MBID   string `json:"mbid,omitempty"`
-	Group  string `json:"group,omitempty"`
+	Artist        string `json:"artist"`
+	Album         string `json:"album"`
+	Year          int    `json:"year,omitempty"`
+	MBID          string `json:"mbid,omitempty"`
+	Group         string `json:"group,omitempty"`
+	ReleaseArtist string `json:"release_artist,omitempty"`
+	ReleaseTitle  string `json:"release_title,omitempty"`
 }
