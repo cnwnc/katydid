@@ -619,6 +619,11 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			req.Source = w.Source
 			req.Artist = w.ReleaseArtist
 			req.Album = w.ReleaseTitle
+		} else if w.ReleaseID != "" {
+			// the release was resolved and the files were picked against
+			// its track list, so import must not re-guess identity from
+			// soulseek file tags
+			req.MBID = w.ReleaseID
 		}
 		result, err := o.cfg.Katyd.Import(req)
 		if err != nil {
