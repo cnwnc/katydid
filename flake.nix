@@ -15,7 +15,7 @@
           pname = "katydid";
           version = "0.1.0";
           src = self;
-          subPackages = [ "cmd/kat" "cmd/katyd" "cmd/katy-fetchd" ];
+          subPackages = [ "cmd/kat" "cmd/katyd" "cmd/katy-fetchd" "cmd/katy-discordd" ];
           env.CGO_ENABLED = "0";
           vendorHash = null;
           doCheck = true;
