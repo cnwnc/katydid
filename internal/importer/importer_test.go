@@ -949,7 +949,7 @@ func TestResolveGroupFlow(t *testing.T) {
 	manager := newManager(t, t.TempDir())
 
 	// fuzzy specifier: group candidates, album type outranks single
-	groups, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "")
+	groups, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "", 0)
 	if err != nil {
 		t.Fatalf("resolve groups: %v", err)
 	}
@@ -961,7 +961,7 @@ func TestResolveGroupFlow(t *testing.T) {
 	}
 
 	// group pick: releases ranked oldest first, titles carried
-	releases, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "rg-album")
+	releases, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "rg-album", 0)
 	if err != nil {
 		t.Fatalf("resolve group: %v", err)
 	}
@@ -979,6 +979,48 @@ func groupSearchBody() string {
 			ArtistCredit: []mb.ArtistCredit{{Name: "Test Artist"}}},
 		{ID: "rg-album", Score: 100, Title: "Test Album", FirstReleaseDate: "2001", PrimaryType: "Album",
 			ArtistCredit: []mb.ArtistCredit{{Name: "Test Artist"}}},
+	}
+	data, _ := json.Marshal(map[string]any{"release-groups": groups})
+	return string(data)
+}
+
+func TestResolveLimit(t *testing.T) {
+	server := mbtest.Custom(t, func(r *http.Request) (string, int) {
+		if strings.HasPrefix(r.URL.Path, "/ws/2/release-group") {
+			return manyGroupsBody(7), http.StatusOK
+		}
+		return `{"error": "no fixture"}`, http.StatusNotFound
+	})
+	mbBase = server.URL
+	manager := newManager(t, t.TempDir())
+
+	single, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "", 1)
+	if err != nil {
+		t.Fatalf("resolve with limit 1: %v", err)
+	}
+	if len(single) != 1 {
+		t.Fatalf("candidates = %d, want 1", len(single))
+	}
+	defaulted, err := manager.Resolve(context.Background(), "Test Artist", "Test Album", 2001, "", "", 0)
+	if err != nil {
+		t.Fatalf("resolve with default limit: %v", err)
+	}
+	if len(defaulted) != 5 {
+		t.Fatalf("candidates = %d, want 5", len(defaulted))
+	}
+}
+
+func manyGroupsBody(count int) string {
+	groups := make([]mb.SearchReleaseGroup, 0, count)
+	for i := 0; i < count; i++ {
+		groups = append(groups, mb.SearchReleaseGroup{
+			ID:               fmt.Sprintf("rg-%d", i),
+			Score:            100,
+			Title:            "Test Album",
+			FirstReleaseDate: "2001",
+			PrimaryType:      "Album",
+			ArtistCredit:     []mb.ArtistCredit{{Name: "Test Artist"}},
+		})
 	}
 	data, _ := json.Marshal(map[string]any{"release-groups": groups})
 	return string(data)

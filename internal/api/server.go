@@ -243,7 +243,16 @@ func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
 		}
 		year = parsed
 	}
-	candidates, err := s.Import.Resolve(r.Context(), artist, album, year, mbid, group)
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+	candidates, err := s.Import.Resolve(r.Context(), artist, album, year, mbid, group, limit)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

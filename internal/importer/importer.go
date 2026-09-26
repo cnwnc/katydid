@@ -381,10 +381,11 @@ func buildRemap(pick int, ordered []sourceFile, release *mb.Release, pairing map
 // Fuzzy specifiers resolve release GROUPS (an album and its single share
 // a title; the type tiebreak separates them); groupID resolves the
 // releases inside one group; mbid pins an exact release.
-func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, mbid string, groupID string) ([]match.Candidate, error) {
+func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, mbid string, groupID string, limit int) ([]match.Candidate, error) {
 	if mbid == "" && groupID == "" && (artist == "" || album == "") {
 		return nil, errors.New("artist and album are required")
 	}
+	limit = clampResolveLimit(limit)
 	evidence := match.Evidence{Artist: artist, Album: album, Year: year}
 
 	if mbid != "" {
@@ -400,7 +401,7 @@ func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, m
 	}
 
 	if groupID != "" {
-		return m.resolveGroup(ctx, evidence, groupID)
+		return m.resolveGroup(ctx, evidence, groupID, limit)
 	}
 
 	groups, err := m.mb.SearchReleaseGroups(ctx, mb.BuildGroupQuery(artist, album))
@@ -412,16 +413,29 @@ func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, m
 		hits = append(hits, groupToSearch(group))
 	}
 	ranked := match.Rank(evidence, hits)
-	const maxCandidates = 5
-	if len(ranked) > maxCandidates {
-		ranked = ranked[:maxCandidates]
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
 	}
 	return ranked, nil
 }
 
+// clampResolveLimit caps a caller-supplied candidate cap; zero or less
+// means the default.
+func clampResolveLimit(limit int) int {
+	const defaultLimit = 5
+	const maxLimit = 25
+	if limit <= 0 {
+		return defaultLimit
+	}
+	if limit > maxLimit {
+		return maxLimit
+	}
+	return limit
+}
+
 // resolveGroup ranks a group's releases; the group is already trusted,
 // so the release list is only ordered (oldest first, then format).
-func (m *Manager) resolveGroup(ctx context.Context, evidence match.Evidence, groupID string) ([]match.Candidate, error) {
+func (m *Manager) resolveGroup(ctx context.Context, evidence match.Evidence, groupID string, limit int) ([]match.Candidate, error) {
 	releases, err := m.mb.GroupReleases(ctx, groupID)
 	if err != nil {
 		return nil, err
@@ -443,6 +457,9 @@ func (m *Manager) resolveGroup(ctx context.Context, evidence match.Evidence, gro
 	// list, so the chosen release carries its titles (best effort)
 	if release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID); err == nil {
 		ranked[0].TrackTitles = releaseTrackTitles(release)
+	}
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
 	}
 	return ranked, nil
 }

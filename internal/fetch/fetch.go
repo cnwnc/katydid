@@ -177,8 +177,9 @@ func New(store *Store, cfg Config) *Orchestrator {
 	return &Orchestrator{store: store, cfg: cfg}
 }
 
-// Add records a new want. Resolution happens on the next tick.
-func (o *Orchestrator) Add(artist, album string, year int, mbid string) (Want, error) {
+// Add records a new want. A non-empty groupID pins the release group and
+// skips the group search. Resolution happens on the next tick.
+func (o *Orchestrator) Add(artist, album string, year int, mbid string, groupID string) (Want, error) {
 	if artist == "" || album == "" {
 		return Want{}, errors.New("artist and album are required")
 	}
@@ -191,6 +192,7 @@ func (o *Orchestrator) Add(artist, album string, year int, mbid string) (Want, e
 		Album:     album,
 		Year:      year,
 		MBID:      mbid,
+		GroupID:   groupID,
 		State:     StateQueued,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -314,6 +316,13 @@ func (o *Orchestrator) withWant(want Want, mutate func(*Want) error) {
 }
 
 func (o *Orchestrator) resolve(ctx context.Context, want Want) {
+	if want.MBID == "" && want.GroupID != "" {
+		// the group is pinned; the group search is skipped entirely
+		o.withWant(want, func(w *Want) error {
+			return o.applyGroupRelease(ctx, w)
+		})
+		return
+	}
 	response, err := o.cfg.Katyd.Resolve(want.Artist, want.Album, want.Year, want.MBID)
 	o.withWant(want, func(w *Want) error {
 		if err != nil {

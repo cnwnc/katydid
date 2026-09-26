@@ -150,12 +150,20 @@ func (c *Client) doWithBody(method, path string, body []byte, out any) error {
 }
 
 func (c *Client) Resolve(artist, album string, year int, mbid string) (api.ResolveResponse, error) {
+	return c.ResolveLimit(artist, album, year, mbid, 0)
+}
+
+// ResolveLimit caps the candidate list; zero or less uses the server default.
+func (c *Client) ResolveLimit(artist, album string, year int, mbid string, limit int) (api.ResolveResponse, error) {
 	params := []string{"artist=" + url.QueryEscape(artist), "album=" + url.QueryEscape(album)}
 	if year != 0 {
 		params = append(params, "year="+fmt.Sprint(year))
 	}
 	if mbid != "" {
 		params = append(params, "mbid="+url.QueryEscape(mbid))
+	}
+	if limit > 0 {
+		params = append(params, "limit="+fmt.Sprint(limit))
 	}
 	var out api.ResolveResponse
 	return out, c.get("/resolve?"+strings.Join(params, "&"), &out)
