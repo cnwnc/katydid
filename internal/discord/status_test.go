@@ -30,12 +30,23 @@ func TestStatusLineDownloadProgress(t *testing.T) {
 
 func TestStatusLineImported(t *testing.T) {
 	w := Want{ID: "abc", Artist: "A", Album: "B", State: stateImported, AlbumID: "alb-1"}
-	if got := statusLine(w); got != "Imported A - B (album alb-1)." {
+	if got := statusLine(w); got != "Imported A - B (alb-1)" {
 		t.Fatalf("line = %q", got)
 	}
 	w.AlbumID = ""
-	if got := statusLine(w); got != "Imported A - B." {
+	if got := statusLine(w); got != "Imported A - B" {
 		t.Fatalf("line = %q", got)
+	}
+}
+
+func TestClip(t *testing.T) {
+	if got := clip("short", 10); got != "short" {
+		t.Fatalf("clip short = %q", got)
+	}
+	long := strings.Repeat("é", 2500)
+	got := clip(long, messageLimit)
+	if n := len([]rune(got)); n != messageLimit || !strings.HasSuffix(got, "…") {
+		t.Fatalf("clip long: %d runes, suffix ok %v", n, strings.HasSuffix(got, "…"))
 	}
 }
 

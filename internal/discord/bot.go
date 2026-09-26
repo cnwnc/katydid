@@ -14,6 +14,9 @@ import (
 const (
 	pollInterval = 5 * time.Second
 	pollBudget   = 14 * time.Minute
+	shareBudget  = 5 * time.Minute
+	// discord rejects message content past this many characters
+	messageLimit = 2000
 	// tracked maps are capped with a blunt reset; entries are tiny and
 	// a lost guard after a reset only risks one duplicate click.
 	mapCap = 4096
@@ -286,12 +289,15 @@ func (b *Bot) onPick(s *discordgo.Session, i *discordgo.InteractionCreate, relea
 		return
 	}
 	b.updateWebhook(s, i.Interaction.Token, componentMessageID(i), statusLine(want))
-	b.startPoll(s, i.Interaction.Token, want, spec.Ephemeral)
+	b.startPoll(s, i.Interaction.Token, want)
 }
 
 // poll drives the deferred response (@original) with live want status.
-func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID string, ephemeral bool) {
+// A failed edit never blocks the terminal check: the next change or the
+// final state still lands.
+func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID string) {
 	defer b.untrack(token)
+	expires := time.Now().Add(pollBudget)
 	deadline := time.NewTimer(pollBudget)
 	defer deadline.Stop()
 	ticker := time.NewTicker(pollInterval)
@@ -311,38 +317,52 @@ func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID stri
 			fmt.Fprintf(os.Stderr, "katy-discordd: poll want %s: %v\n", wantID, err)
 			continue
 		}
-		if line := statusLine(w); line != last {
+		sharing := w.State == stateImported && b.navidrome != nil
+		line := statusLine(w)
+		if sharing {
+			line += "\nNavidrome: (pending)"
+		}
+		if line != last {
 			if err := b.updateWebhook(s, token, "@original", line); err != nil {
 				fmt.Fprintf(os.Stderr, "katy-discordd: poll edit %s: %v\n", wantID, err)
-				continue
+			} else {
+				last = line
 			}
-			last = line
 		}
 		if terminalState(w.State) {
-			if w.State == stateImported && b.navidrome != nil {
-				b.postShare(s, token, w, ephemeral)
+			if sharing {
+				b.shareInto(s, token, w, expires)
 			}
 			return
 		}
 	}
 }
 
-// postShare follows up a successful import with a navidrome share link.
-func (b *Bot) postShare(s *discordgo.Session, token string, w Want, ephemeral bool) {
-	ctx, cancel := context.WithTimeout(b.root, 5*time.Minute)
+// shareInto refreshes navidrome and replaces the pending placeholder on
+// the status message with the share link. The work is bounded by the
+// interaction token's lifetime, past which the message is uneditable.
+func (b *Bot) shareInto(s *discordgo.Session, token string, w Want, expires time.Time) {
+	ctx, cancel := context.WithDeadline(b.root, minTime(time.Now().Add(shareBudget), expires))
 	defer cancel()
 	url, err := b.navidrome.RefreshAndShare(ctx, w.Artist, w.Album)
-	content := "navidrome share (downloads on): " + url
+	result := "Navidrome: " + url
 	if err != nil {
-		content = "navidrome: " + err.Error()
+		fmt.Fprintf(os.Stderr, "katy-discordd: navidrome share %s: %v\n", w.ID, err)
+		result = "Navidrome: failed, " + err.Error()
 	}
-	_, err = s.WebhookExecute(b.appID, token, true, &discordgo.WebhookParams{Content: content, Flags: ephemeralFlags(ephemeral), AllowedMentions: noMentions()})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "katy-discordd: share followup: %v\n", err)
+	if err := b.updateWebhook(s, token, "@original", statusLine(w)+"\n"+result); err != nil {
+		fmt.Fprintf(os.Stderr, "katy-discordd: share edit %s: %v\n", w.ID, err)
 	}
 }
 
-func (b *Bot) startPoll(s *discordgo.Session, token string, want Want, ephemeral bool) {
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func (b *Bot) startPoll(s *discordgo.Session, token string, want Want) {
 	b.mu.Lock()
 	if _, dup := b.polls[token]; dup {
 		b.mu.Unlock()
@@ -351,7 +371,7 @@ func (b *Bot) startPoll(s *discordgo.Session, token string, want Want, ephemeral
 	ctx, cancel := context.WithCancel(b.root)
 	b.polls[token] = cancel
 	b.mu.Unlock()
-	go b.poll(s, ctx, token, want.ID, ephemeral)
+	go b.poll(s, ctx, token, want.ID)
 }
 
 func (b *Bot) untrack(token string) {
@@ -422,6 +442,7 @@ func (b *Bot) updateMessage(s *discordgo.Session, i *discordgo.InteractionCreate
 
 // updateWebhook patches a webhook message (@original or a followup) by token.
 func (b *Bot) updateWebhook(s *discordgo.Session, token, messageID, text string) error {
+	text = clip(text, messageLimit)
 	_, err := s.WebhookMessageEdit(b.appID, token, messageID, &discordgo.WebhookEdit{
 		Content:         &text,
 		AllowedMentions: noMentions(),
@@ -430,6 +451,7 @@ func (b *Bot) updateWebhook(s *discordgo.Session, token, messageID, text string)
 }
 
 func (b *Bot) editOriginal(s *discordgo.Session, i *discordgo.Interaction, text string) {
+	text = clip(text, messageLimit)
 	if _, err := s.InteractionResponseEdit(i, &discordgo.WebhookEdit{
 		Content:         &text,
 		AllowedMentions: noMentions(),
@@ -462,6 +484,15 @@ func componentMessageID(i *discordgo.InteractionCreate) string {
 		return i.Message.ID
 	}
 	return "@original"
+}
+
+// clip keeps text within limit characters, marking the cut.
+func clip(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 func messageText(m *discordgo.Message) string {

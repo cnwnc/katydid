@@ -31,9 +31,8 @@ func statusLine(w Want) string {
 	case stateImported:
 		b.WriteString("Imported " + w.Artist + " - " + w.Album)
 		if w.AlbumID != "" {
-			b.WriteString(" (album " + w.AlbumID + ")")
+			b.WriteString(" (" + w.AlbumID + ")")
 		}
-		b.WriteString(".")
 	case stateSkipped:
 		b.WriteString("Skipped " + w.Artist + " - " + w.Album + ".")
 	case stateFailed:
