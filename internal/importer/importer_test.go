@@ -17,6 +17,7 @@ import (
 	"doppel.moe/katydid/internal/mb"
 	"doppel.moe/katydid/internal/mb/mbtest"
 	"doppel.moe/katydid/internal/sidecar"
+	"doppel.moe/katydid/internal/tags"
 	"doppel.moe/katydid/internal/testaudio"
 	"go.senan.xyz/taglib"
 )
@@ -754,6 +755,93 @@ func TestImportRejectsUnmatchedFiles(t *testing.T) {
 	}
 	if len(sc.Tracks) != 4 {
 		t.Errorf("published %d tracks, want 4 (outtake left out)", len(sc.Tracks))
+	}
+}
+
+func TestPairFilesRejectsShiftedList(t *testing.T) {
+	// a release in the group dropped the album's first track, so equal
+	// counts used to pair every remaining file one position off and
+	// retitle the whole album
+	release := mbtest.SyntheticRelease("rel-shift", "rg-shift", "Test Album", "Test Artist", "2022-12-07",
+		mb.ReleaseMedia{Position: 1, Format: "Digital Media", TrackCount: 3, Tracks: []mb.ReleaseTrack{
+			mbtest.Track(1, "Descent"), mbtest.Track(2, "Pink!"), mbtest.Track(3, "Closer"),
+		}})
+	files := []sourceFile{
+		{base: "01 - Warning.flac", tags: tags.Tags{Title: "Warning", TrackNumber: 1, DiscNumber: 1}},
+		{base: "02 - Descent.flac", tags: tags.Tags{Title: "Descent", TrackNumber: 2, DiscNumber: 1}},
+		{base: "03 - Pink!.flac", tags: tags.Tags{Title: "Pink!", TrackNumber: 3, DiscNumber: 1}},
+	}
+
+	pairing, unpaired, err := pairFiles(orderFiles(files), &release, nil)
+	if err != nil {
+		t.Fatalf("pairFiles: %v", err)
+	}
+	if len(unpaired) != 1 || unpaired[0] != 1 {
+		t.Fatalf("unpaired: %v, want [1]", unpaired)
+	}
+	if pairing[2] != 1 || pairing[3] != 2 {
+		t.Fatalf("pairing: %v, want 2->1 and 3->2 by title", pairing)
+	}
+	if _, ok := pairing[1]; ok {
+		t.Fatalf("file 1 paired despite a shifted track list: %v", pairing)
+	}
+}
+
+func TestPairFilesRejectsDisagreeingTitles(t *testing.T) {
+	release := mbtest.SyntheticRelease("rel-dis", "rg-dis", "Test Album", "Test Artist", "2001-10-01",
+		mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 3, Tracks: []mb.ReleaseTrack{
+			mbtest.Track(1, "Rocks"), mbtest.Track(2, "Sand"), mbtest.Track(3, "Wind"),
+		}})
+	files := []sourceFile{
+		{base: "01 - Sun.flac", tags: tags.Tags{Title: "Sun", TrackNumber: 1, DiscNumber: 1}},
+		{base: "02 - Moon.flac", tags: tags.Tags{Title: "Moon", TrackNumber: 2, DiscNumber: 1}},
+		{base: "03 - Star.flac", tags: tags.Tags{Title: "Star", TrackNumber: 3, DiscNumber: 1}},
+	}
+
+	pairing, unpaired, err := pairFiles(orderFiles(files), &release, nil)
+	if err != nil {
+		t.Fatalf("pairFiles: %v", err)
+	}
+	if len(pairing) != 0 || len(unpaired) != 3 {
+		t.Fatalf("pairing %v unpaired %v, want nothing paired", pairing, unpaired)
+	}
+}
+
+func TestPairFilesEqualCountsAgreeingTitles(t *testing.T) {
+	release := mbtest.SyntheticRelease("rel-eq", "rg-eq", "Test Album", "Test Artist", "2001-10-01",
+		mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+			mbtest.Track(1, "First Song"), mbtest.Track(2, "Second Song"),
+		}})
+	files := []sourceFile{
+		{base: "01 - First Song.flac", tags: tags.Tags{Title: "First Song", TrackNumber: 1, DiscNumber: 1}},
+		{base: "02 - Second Song.flac", tags: tags.Tags{Title: "Second Song", TrackNumber: 2, DiscNumber: 1}},
+	}
+
+	pairing, unpaired, err := pairFiles(orderFiles(files), &release, nil)
+	if err != nil {
+		t.Fatalf("pairFiles: %v", err)
+	}
+	if len(unpaired) != 0 || pairing[1] != 1 || pairing[2] != 2 {
+		t.Fatalf("pairing %v unpaired %v, want 1->1 and 2->2", pairing, unpaired)
+	}
+}
+
+func TestPairFilesTrustsNumbersAcrossScripts(t *testing.T) {
+	release := mbtest.SyntheticRelease("rel-jp", "rg-jp", "Test Album", "Test Artist", "2001-10-01",
+		mb.ReleaseMedia{Position: 1, Format: "CD", TrackCount: 2, Tracks: []mb.ReleaseTrack{
+			mbtest.Track(1, "最初の歌"), mbtest.Track(2, "二番目の歌"),
+		}})
+	files := []sourceFile{
+		{base: "01 - First Song.flac", tags: tags.Tags{Title: "First Song", TrackNumber: 1, DiscNumber: 1}},
+		{base: "02 - Second Song.flac", tags: tags.Tags{Title: "Second Song", TrackNumber: 2, DiscNumber: 1}},
+	}
+
+	pairing, unpaired, err := pairFiles(orderFiles(files), &release, nil)
+	if err != nil {
+		t.Fatalf("pairFiles: %v", err)
+	}
+	if len(unpaired) != 0 || pairing[1] != 1 || pairing[2] != 2 {
+		t.Fatalf("pairing %v unpaired %v, want numbers trusted across scripts", pairing, unpaired)
 	}
 }
 

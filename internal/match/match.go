@@ -14,6 +14,7 @@ const (
 	AutoThreshold      = 0.90
 	AutoTitleSim       = 0.75
 	AutoTrackCountSim  = 0.80
+	PairTitleSim       = 0.40
 	SpecifierTitleSim  = 0.90
 	SpecifierArtistSim = 0.90
 	minSearchScore     = 40
@@ -311,6 +312,38 @@ func Similarity(a, b string) float64 {
 		return 0
 	}
 	return dice(a, b)
+}
+
+// ComparableTitles reports whether two titles carry similarity signal:
+// titles written in different scripts (romaji file tags against
+// japanese release titles) never match by content, so pairing must
+// trust track numbers instead of gating on titles.
+func ComparableTitles(a, b string) bool {
+	sa, sb := scriptBuckets(a), scriptBuckets(b)
+	if len(sa) == 0 || len(sb) == 0 {
+		return false
+	}
+	for bucket := range sa {
+		if sb[bucket] {
+			return true
+		}
+	}
+	return false
+}
+
+func scriptBuckets(s string) map[rune]bool {
+	buckets := map[rune]bool{}
+	for _, ch := range s {
+		if !unicode.IsLetter(ch) {
+			continue
+		}
+		if ch < 0x80 {
+			buckets['L'] = true
+			continue
+		}
+		buckets[ch>>7] = true
+	}
+	return buckets
 }
 
 func dice(a, b string) float64 {

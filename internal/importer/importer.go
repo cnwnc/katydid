@@ -1071,8 +1071,10 @@ func orderFiles(files []sourceFile) []sourceFile {
 // pairFiles assigns files to release tracks. Overrides (1-based file
 // index to 1-based track index) are applied first and may steal tracks
 // from the greedy pass; the rest match by disc/track number, then title
-// similarity, with equal-count directories pairing positionally.
-// Unpaired files are reported, never an error.
+// similarity. A number match must still agree on title: releases in a
+// group often drop or add tracks, so trusting numbers alone labels a
+// whole album one position off. Unpaired files are reported, never an
+// error.
 func pairFiles(ordered []sourceFile, release *mb.Release, overrides map[int]int) (map[int]int, []int, error) {
 	tracks := release.FlattenedTracks()
 	pairing := map[int]int{}
@@ -1096,13 +1098,6 @@ func pairFiles(ordered []sourceFile, release *mb.Release, overrides map[int]int)
 		claimed[trackIndex] = true
 	}
 
-	if len(overrides) == 0 && len(ordered) == len(tracks) {
-		for i := range ordered {
-			pairing[i+1] = i + 1
-		}
-		return pairing, nil, nil
-	}
-
 	mediumOf := mediumPositions(release)
 	used := make([]bool, len(tracks))
 	for _, trackIndex := range pairing {
@@ -1115,11 +1110,18 @@ func pairFiles(ordered []sourceFile, release *mb.Release, overrides map[int]int)
 		if _, forced := pairing[fileIndex]; forced {
 			continue
 		}
+		fileTitle := firstNonEmpty(file.tags.Title, titleFromFilename(file.base))
 		index := -1
 		if file.tags.DiscNumber != 0 && file.tags.TrackNumber != 0 {
 			for j, track := range tracks {
 				if !used[j] && mediumOf[j] == file.tags.DiscNumber && track.Position == file.tags.TrackNumber {
-					index = j
+					// numbers align even when a release in the
+					// group dropped a track, so a number match
+					// is only trusted when the title agrees or
+					// carries no signal at all
+					if sim := match.Similarity(fileTitle, track.Title); sim >= match.PairTitleSim || !match.ComparableTitles(fileTitle, track.Title) {
+						index = j
+					}
 					break
 				}
 			}
@@ -1130,7 +1132,7 @@ func pairFiles(ordered []sourceFile, release *mb.Release, overrides map[int]int)
 				if used[j] {
 					continue
 				}
-				if sim := match.Similarity(firstNonEmpty(file.tags.Title, titleFromFilename(file.base)), track.Title); sim > bestSim {
+				if sim := match.Similarity(fileTitle, track.Title); sim > bestSim {
 					best, bestSim = j, sim
 				}
 			}
