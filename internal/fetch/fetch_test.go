@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"doppel.moe/katydid/internal/api"
@@ -516,6 +517,115 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 	cumulative := slskdFake.enqueued["peer"]
 	if len(cumulative) != 3 || cumulative[2].Filename != `dir\SAETIA\02 - orbit.flac` {
 		t.Fatalf("last enqueue should be only the failed file: %+v", cumulative)
+	}
+}
+
+// twoPeerWant starts a two-track want whose search answered from two
+// peers, "peer" preferred (free slot) over "other", and returns it once
+// the first peer has been enqueued.
+func twoPeerWant(t *testing.T, slskdFake *fakeSlskd) (*fetch.Orchestrator, fetch.Want) {
+	t.Helper()
+	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"))
+	want, _ := orchestrator.Add("saetia", "saetia", 0, "", "")
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "other", Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 10},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.Peer != "peer" {
+		t.Fatalf("first pick = %q, want peer", want.Peer)
+	}
+	return orchestrator, want
+}
+
+func failedTransfers(user string, files map[string]int64, reason string) slskd.UserResponse {
+	transfers := []slskd.Transfer{}
+	for name, size := range files {
+		transfers = append(transfers, slskd.Transfer{ID: name, Filename: name, Size: size, State: "Completed, Errored", Exception: strPtr(reason)})
+	}
+	return slskd.UserResponse{Username: user, Directories: []slskd.DirectoryResponse{{Files: transfers}}}
+}
+
+func TestWholeAlbumRefusedSwitchesPeer(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	slskdFake.downloads = []slskd.UserResponse{failedTransfers("peer", map[string]int64{
+		`dir\SAETIA\01 - vault.flac`: 9,
+		`dir\SAETIA\02 - orbit.flac`: 19,
+	}, "File not shared.")}
+
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || len(want.ExcludedPeers) != 1 || want.ExcludedPeers[0] != "peer" {
+		t.Fatalf("after refusal: state %q excluded %v err %q", want.State, want.ExcludedPeers, want.Error)
+	}
+	if len(slskdFake.searches) != 1 {
+		t.Fatalf("the finished search should be reused, got %d searches", len(slskdFake.searches))
+	}
+
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "other" {
+		t.Fatalf("should move to other: state %q peer %q err %q", want.State, want.Peer, want.Error)
+	}
+	if len(slskdFake.enqueued["other"]) != 2 {
+		t.Fatalf("other enqueued %d files, want 2", len(slskdFake.enqueued["other"]))
+	}
+	if len(want.Attempts) != 0 {
+		t.Fatalf("attempts should reset for the new peer: %v", want.Attempts)
+	}
+}
+
+func TestRepeatedFileFailureSwitchesPeer(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Rejected", Exception: strPtr("File not shared.")},
+	}}}}}
+
+	for i := 0; i < 3; i++ {
+		orchestrator.Tick(context.Background())
+		if got := find(t, orchestrator, want.ID); got.State != fetch.StateDownloading || got.Peer != "peer" {
+			t.Fatalf("retry %d should stay on peer: state %q peer %q", i+1, got.State, got.Peer)
+		}
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || len(want.ExcludedPeers) != 1 {
+		t.Fatalf("fourth failure should drop the peer: state %q excluded %v err %q", want.State, want.ExcludedPeers, want.Error)
+	}
+	orchestrator.Tick(context.Background())
+	if got := find(t, orchestrator, want.ID); got.Peer != "other" {
+		t.Fatalf("should move to other, got %q (%s)", got.Peer, got.Error)
+	}
+}
+
+func TestNoPeerLeftFailsTheWant(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	refuse := func(user string, files map[string]int64) {
+		slskdFake.downloads = []slskd.UserResponse{failedTransfers(user, files, "File not shared.")}
+		orchestrator.Tick(context.Background())
+		orchestrator.Tick(context.Background())
+	}
+	refuse("peer", map[string]int64{`dir\SAETIA\01 - vault.flac`: 9, `dir\SAETIA\02 - orbit.flac`: 19})
+	refuse("other", map[string]int64{`x\saetia\01 vault.flac`: 10, `x\saetia\02 orbit.flac`: 20})
+
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateFailed || !strings.Contains(want.Error, "no other peer") {
+		t.Fatalf("state %q err %q, want failed with no other peer", want.State, want.Error)
 	}
 }
 

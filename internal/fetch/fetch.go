@@ -62,7 +62,9 @@ type Want struct {
 	Peer          string            `json:"peer,omitempty"`
 	RemoteDir     string            `json:"remote_dir,omitempty"`
 	Enqueued      []slskd.File      `json:"enqueued,omitempty"`
+	Downloaded    int               `json:"downloaded,omitempty"`
 	DecisionToken string            `json:"decision_token,omitempty"`
+	ExcludedPeers []string          `json:"excluded_peers,omitempty"`
 	AlbumID       string            `json:"album_id,omitempty"`
 	Attempts      map[string]int    `json:"attempts,omitempty"`
 	Notes         []string          `json:"notes,omitempty"`
@@ -407,8 +409,11 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			}
 			return nil
 		}
-		peer, files, err := pickSource(search, w.TrackTitles, w.TrackCount)
+		peer, files, err := pickSource(search, w.TrackTitles, w.TrackCount, w.ExcludedPeers)
 		if err != nil {
+			if len(w.ExcludedPeers) > 0 {
+				return fmt.Errorf("no other peer after dropping %s: %w", strings.Join(w.ExcludedPeers, ", "), err)
+			}
 			return err
 		}
 		if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
@@ -423,8 +428,12 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 }
 
 // maxDownloadRetries bounds how often a failed transfer is re-enqueued
-// before the want fails.
-const maxDownloadRetries = 3
+// before the peer is dropped; maxPeers bounds how many peers a want
+// tries before it fails.
+const (
+	maxDownloadRetries = 3
+	maxPeers           = 5
+)
 
 func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 	users, err := o.cfg.Slskd.Downloads(ctx)
@@ -476,34 +485,31 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 				failed = append(failed, transfer)
 			}
 		}
+		w.Downloaded = succeeded
 		if len(failed) > 0 {
+			if w.Attempts == nil {
+				w.Attempts = map[string]int{}
+			}
+			exhausted := false
 			retry := []slskd.File{}
-			summary := []string{}
 			for _, transfer := range failed {
-				reason := "unknown reason"
-				if transfer.Exception != nil {
-					reason = *transfer.Exception
-				}
-				label := fmt.Sprintf("%s: %s", filepath.Base(remoteName(transfer.Filename)), reason)
-				if w.Attempts == nil {
-					w.Attempts = map[string]int{}
-				}
 				w.Attempts[transfer.Filename]++
-				if w.Attempts[transfer.Filename] <= maxDownloadRetries {
-					retry = append(retry, filesByName[transfer.Filename])
-					summary = append(summary, label+" (re-enqueued)")
-					continue
+				if w.Attempts[transfer.Filename] > maxDownloadRetries {
+					exhausted = true
 				}
-				summary = append(summary, label)
+				retry = append(retry, filesByName[transfer.Filename])
 			}
-			if len(retry) > 0 {
-				if err := o.cfg.Slskd.EnqueueDownloads(ctx, w.Peer, retry); err != nil {
-					return fmt.Errorf("re-enqueue %d failed files: %w", len(retry), err)
-				}
-				w.Notes = append(w.Notes, fmt.Sprintf("re-enqueued %d failed file(s): %s", len(retry), strings.Join(summary, "; ")))
-				return nil
+			summary := failureSummary(failed, len(enqueued))
+			// a peer refusing the whole album at once is blocking it, and a
+			// file that keeps failing will not come from this peer either
+			if exhausted || len(failed) == len(enqueued) {
+				return o.switchPeer(ctx, w, summary)
 			}
-			return fmt.Errorf("%d of %d transfers failed: %s", len(failed), len(enqueued), strings.Join(summary, "; "))
+			if err := o.cfg.Slskd.EnqueueDownloads(ctx, w.Peer, retry); err != nil {
+				return fmt.Errorf("re-enqueue %d failed files: %w", len(retry), err)
+			}
+			w.Notes = append(w.Notes, "re-enqueued "+summary)
+			return nil
 		}
 		if succeeded < len(enqueued) {
 			return nil
@@ -522,6 +528,48 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 		}
 		return o.absorbResult(w, result)
 	})
+}
+
+// switchPeer drops the current peer and goes back to source picking,
+// reusing the finished search when slskd still has it.
+func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) error {
+	dropped := w.Peer
+	w.ExcludedPeers = append(w.ExcludedPeers, dropped)
+	w.Notes = append(w.Notes, fmt.Sprintf("dropped peer %s: %s", dropped, reason))
+	w.Peer, w.RemoteDir, w.Enqueued, w.Attempts, w.Downloaded = "", "", nil, nil, 0
+	if len(w.ExcludedPeers) >= maxPeers {
+		return fmt.Errorf("gave up after %d peers, last %s: %s", len(w.ExcludedPeers), dropped, reason)
+	}
+	if w.SearchID != "" {
+		if _, err := o.cfg.Slskd.Search(ctx, w.SearchID, false); err == nil {
+			w.State = StateSearching
+			return nil
+		}
+	}
+	return o.beginSearch(ctx, w)
+}
+
+// failureSummary condenses failed transfers by reason: "3 of 12 transfers
+// failed: File not shared. x3".
+func failureSummary(failed []slskd.Transfer, total int) string {
+	counts := map[string]int{}
+	for _, transfer := range failed {
+		reason := "unknown reason"
+		if transfer.Exception != nil && *transfer.Exception != "" {
+			reason = *transfer.Exception
+		}
+		counts[reason]++
+	}
+	reasons := make([]string, 0, len(counts))
+	for reason := range counts {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, fmt.Sprintf("%s x%d", reason, counts[reason]))
+	}
+	return fmt.Sprintf("%d of %d transfers failed: %s", len(failed), total, strings.Join(parts, ", "))
 }
 
 // reconcileDecision picks up decisions resolved through another client;
@@ -647,7 +695,11 @@ func coverageOf(files []slskd.File, titles []string) (float64, []slskd.File) {
 // pickSource chooses the peer whose files best cover the release track
 // list (falling back to count heuristics when titles are unknown) and
 // returns only the files that plausibly belong to the release.
-func pickSource(search *slskd.Search, titles []string, trackCount int) (string, []slskd.File, error) {
+func pickSource(search *slskd.Search, titles []string, trackCount int, excluded []string) (string, []slskd.File, error) {
+	skip := map[string]bool{}
+	for _, peer := range excluded {
+		skip[peer] = true
+	}
 	type offer struct {
 		peer     string
 		score    float64
@@ -656,6 +708,9 @@ func pickSource(search *slskd.Search, titles []string, trackCount int) (string, 
 	}
 	var offers []offer
 	for _, response := range search.Responses {
+		if skip[response.Username] {
+			continue
+		}
 		files := []slskd.File{}
 		for _, file := range response.Files {
 			if file.IsLocked || !audioExtensions[strings.ToLower(filepath.Ext(remoteName(file.Filename)))] {
