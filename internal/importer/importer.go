@@ -387,7 +387,11 @@ func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, m
 			return nil, err
 		}
 		evidence := match.Evidence{Artist: artist, Album: album, Year: year}
-		return match.Rank(evidence, []mb.SearchRelease{searchFromRelease(release)}), nil
+		ranked := match.Rank(evidence, []mb.SearchRelease{searchFromRelease(release)})
+		if len(ranked) > 0 {
+			ranked[0].TrackTitles = releaseTrackTitles(release)
+		}
+		return ranked, nil
 	}
 	releases, err := m.mb.SearchReleases(ctx, mb.BuildQuery(artist, album))
 	if err != nil {
@@ -399,7 +403,23 @@ func (m *Manager) Resolve(ctx context.Context, artist, album string, year int, m
 	if len(ranked) > maxCandidates {
 		ranked = ranked[:maxCandidates]
 	}
+	// the fetcher verifies soulseek results against the release track
+	// list, so the top candidate carries its titles (best effort)
+	if len(ranked) > 0 {
+		if release, err := m.mb.LookupRelease(ctx, ranked[0].ReleaseID); err == nil {
+			ranked[0].TrackTitles = releaseTrackTitles(release)
+		}
+	}
 	return ranked, nil
+}
+
+// releaseTrackTitles lists a release track titles in release order.
+func releaseTrackTitles(release *mb.Release) []string {
+	titles := []string{}
+	for _, track := range release.FlattenedTracks() {
+		titles = append(titles, track.Title)
+	}
+	return titles
 }
 
 func searchFromRelease(release *mb.Release) mb.SearchRelease {

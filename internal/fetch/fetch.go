@@ -44,16 +44,17 @@ var audioExtensions = map[string]bool{
 const staleAfter = 6 * time.Hour
 
 type Want struct {
-	ID         string    `json:"id"`
-	Artist     string    `json:"artist"`
-	Album      string    `json:"album"`
-	Year       int       `json:"year,omitempty"`
-	MBID       string    `json:"mbid,omitempty"`
-	TrackCount int       `json:"track_count,omitempty"`
-	State      string    `json:"state"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	Artist      string    `json:"artist"`
+	Album       string    `json:"album"`
+	Year        int       `json:"year,omitempty"`
+	MBID        string    `json:"mbid,omitempty"`
+	TrackCount  int       `json:"track_count,omitempty"`
+	TrackTitles []string  `json:"track_titles,omitempty"`
+	State       string    `json:"state"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 
 	Candidates    []match.Candidate `json:"candidates,omitempty"`
 	SearchID      string            `json:"search_id,omitempty"`
@@ -232,6 +233,10 @@ func (o *Orchestrator) Decide(ctx context.Context, id string, pick int, skip boo
 			return Want{}, fmt.Errorf("pick %d out of range 1..%d", pick, len(want.Candidates))
 		}
 		want.TrackCount = want.Candidates[pick-1].TrackCount
+		// titles let the source picker verify coverage before downloading
+		if refreshed, err := o.cfg.Katyd.Resolve(want.Artist, want.Album, want.Year, want.Candidates[pick-1].ReleaseID); err == nil && len(refreshed.Candidates) > 0 {
+			want.TrackTitles = refreshed.Candidates[0].TrackTitles
+		}
 		want.Candidates = nil
 		return o.beginSearchLocked(ctx, want)
 	case StateNeedsPick:
@@ -311,6 +316,7 @@ func (o *Orchestrator) resolve(ctx context.Context, want Want) {
 		}
 		if response.Auto {
 			w.TrackCount = response.Candidates[0].TrackCount
+			w.TrackTitles = response.Candidates[0].TrackTitles
 			w.Candidates = nil
 			return o.beginSearch(ctx, w)
 		}
@@ -360,7 +366,7 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			}
 			return nil
 		}
-		peer, files, err := pickSource(search, w.TrackCount)
+		peer, files, err := pickSource(search, w.TrackTitles, w.TrackCount)
 		if err != nil {
 			return err
 		}
@@ -548,69 +554,126 @@ func locateDownload(want *Want, downloadsDir string) (string, error) {
 }
 
 // pickSource chooses the peer directory that best matches the release.
-func pickSource(search *slskd.Search, trackCount int) (string, []slskd.File, error) {
-	type dirChoice struct {
-		peer  string
-		dir   string
-		score float64
-		files []slskd.File
+// minCoverage is the fraction of the release track list a peer's files
+// must plausibly cover before anything is downloaded; below it the want
+// fails instead of pulling partial or tribute junk.
+const minCoverage = 0.6
+
+// fileTitleGuess extracts a comparable title from a soulseek filename:
+// extension and leading track numbers stripped.
+func fileTitleGuess(name string) string {
+	base := remoteName(name)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	dash := strings.Index(base, " - ")
+	if dash >= 0 {
+		base = base[dash+3:]
 	}
-	var choices []dirChoice
+	trimmed := strings.TrimLeft(base, "0123456789 .-_")
+	if trimmed != "" {
+		base = trimmed
+	}
+	return base
+}
+
+// coverage is how well a peer's files cover a release track list: each
+// file is greedily matched to an unclaimed title and only reasonably
+// close matches count.
+func coverageOf(files []slskd.File, titles []string) (float64, []slskd.File) {
+	used := make([]bool, len(titles))
+	matched := []slskd.File{}
+	for _, file := range files {
+		guess := strings.ToLower(fileTitleGuess(file.Filename))
+		best, bestSim := -1, 0.0
+		for i, title := range titles {
+			if used[i] {
+				continue
+			}
+			if sim := match.Similarity(guess, strings.ToLower(title)); sim > bestSim {
+				best, bestSim = i, sim
+			}
+		}
+		if best >= 0 && bestSim >= 0.5 {
+			used[best] = true
+			matched = append(matched, file)
+		}
+	}
+	if len(titles) == 0 {
+		return 0, nil
+	}
+	return float64(len(matched)) / float64(len(titles)), matched
+}
+
+// pickSource chooses the peer whose files best cover the release track
+// list (falling back to count heuristics when titles are unknown) and
+// returns only the files that plausibly belong to the release.
+func pickSource(search *slskd.Search, titles []string, trackCount int) (string, []slskd.File, error) {
+	type offer struct {
+		peer     string
+		score    float64
+		coverage float64
+		files    []slskd.File
+	}
+	var offers []offer
 	for _, response := range search.Responses {
-		groups := map[string][]slskd.File{}
+		files := []slskd.File{}
 		for _, file := range response.Files {
 			if file.IsLocked || !audioExtensions[strings.ToLower(filepath.Ext(remoteName(file.Filename)))] {
 				continue
 			}
-			groups[remoteParent(file.Filename)] = append(groups[remoteParent(file.Filename)], file)
+			files = append(files, file)
 		}
-		for dir, files := range groups {
-			choice := dirChoice{peer: response.Username, dir: dir, files: files}
-			choice.score = sourceScore(response, files, trackCount)
-			choices = append(choices, choice)
+		if len(files) == 0 {
+			continue
 		}
+		choice := offer{peer: response.Username, files: files}
+		if len(titles) > 0 {
+			choice.coverage, choice.files = coverageOf(files, titles)
+			choice.score = choice.coverage
+		} else if trackCount > 0 {
+			delta := len(files) - trackCount
+			if delta < 0 {
+				delta = -delta
+			}
+			choice.coverage = float64(len(files)) / float64(trackCount)
+			choice.score = 1.0 - float64(delta)/float64(trackCount)
+		} else {
+			choice.coverage = 1
+			choice.score = 0.5
+		}
+		lossless := 0
+		for _, file := range choice.files {
+			if strings.EqualFold(filepath.Ext(remoteName(file.Filename)), ".flac") {
+				lossless++
+			}
+		}
+		if len(choice.files) > 0 {
+			choice.score += 0.2 * float64(lossless) / float64(len(choice.files))
+		}
+		if response.HasFreeUploadSlot {
+			choice.score += 0.1
+		}
+		if response.QueueLength < 100 {
+			choice.score += 0.05
+		}
+		offers = append(offers, choice)
 	}
-	if len(choices) == 0 {
+	if len(offers) == 0 {
 		return "", nil, errors.New("no usable audio files in any response")
 	}
-	sort.Slice(choices, func(i, j int) bool {
-		if choices[i].score != choices[j].score {
-			return choices[i].score > choices[j].score
+	sort.Slice(offers, func(i, j int) bool {
+		if offers[i].score != offers[j].score {
+			return offers[i].score > offers[j].score
 		}
-		return choices[i].dir < choices[j].dir
+		return offers[i].peer < offers[j].peer
 	})
-	choice := choices[0]
-	sort.Slice(choice.files, func(i, j int) bool {
-		return remoteName(choice.files[i].Filename) < remoteName(choice.files[j].Filename)
+	best := offers[0]
+	if len(titles) > 0 && best.coverage < minCoverage {
+		return "", nil, fmt.Errorf("best peer %s covers only %d%% of the %d release tracks; nothing downloaded", best.peer, int(best.coverage*100), len(titles))
+	}
+	sort.Slice(best.files, func(i, j int) bool {
+		return remoteName(best.files[i].Filename) < remoteName(best.files[j].Filename)
 	})
-	return choice.peer, choice.files, nil
-}
-
-func sourceScore(response slskd.Response, files []slskd.File, trackCount int) float64 {
-	score := 0.0
-	if trackCount > 0 {
-		delta := len(files) - trackCount
-		if delta < 0 {
-			delta = -delta
-		}
-		score += 1.0 - float64(delta)/float64(trackCount)
-	} else {
-		score += 0.5
-	}
-	lossless := 0
-	for _, file := range files {
-		if strings.EqualFold(filepath.Ext(remoteName(file.Filename)), ".flac") {
-			lossless++
-		}
-	}
-	score += 0.3 * float64(lossless) / float64(len(files))
-	if response.HasFreeUploadSlot {
-		score += 0.2
-	}
-	if response.QueueLength < 100 {
-		score += 0.1
-	}
-	return score
+	return best.peer, best.files, nil
 }
 
 // remoteParent and remoteName handle soulseek backslash paths portably.

@@ -38,8 +38,8 @@ type Evidence struct {
 	Artist      string   `json:"artist"`
 	Album       string   `json:"album"`
 	Year        int      `json:"year"`
-	TrackCount  int      `json:"track_count"`
 	TrackTitles []string `json:"track_titles"`
+	TrackCount  int      `json:"track_count"`
 }
 
 type Candidate struct {
@@ -50,6 +50,7 @@ type Candidate struct {
 	Artist        string   `json:"artist"`
 	Date          string   `json:"date,omitempty"`
 	TrackCount    int      `json:"track_count"`
+	TrackTitles   []string `json:"track_titles,omitempty"`
 	Formats       []string `json:"formats,omitempty"`
 	Score         float64  `json:"score"`
 	TitleSim      float64  `json:"title_sim"`

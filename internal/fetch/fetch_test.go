@@ -515,3 +515,118 @@ func TestFailedTransfersAreReenqueued(t *testing.T) {
 		t.Fatalf("last enqueue should be only the failed file: %+v", cumulative)
 	}
 }
+
+func autoTitlesResolver(titles ...string) *fakeKatyd {
+	candidates := []match.Candidate{{ReleaseID: "r1", TrackCount: len(titles), TitleSim: 1, ArtistSim: 1, TrackTitles: titles}}
+	return &fakeKatyd{resolve: api.ResolveResponse{Candidates: candidates, Auto: true}}
+}
+
+func startDownloadWanted(t *testing.T, slskdFake *fakeSlskd, katydFake *fakeKatyd) (fetch.Want, string) {
+	t.Helper()
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, err := orchestrator.Add("metallica", "master of puppets", 1986, "")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	orchestrator.Tick(context.Background())
+	found := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[found.SearchID]
+	search.IsComplete = true
+	return want, root
+}
+
+func TestSingleIsRejectedForLowCoverage(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("Battery", "Master of Puppets", "The Thing That Should Not Be", "Orion")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add("metallica", "master of puppets", 1986, "")
+	orchestrator.Tick(context.Background())
+	found := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[found.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username:          "singlepeer",
+		HasFreeUploadSlot: true,
+		Files: []slskd.File{
+			{Filename: `MoP 7 inch\Master of Puppets.flac`, Size: 100},
+			{Filename: `MoP 7 inch\Welcome Home (Sanitarium).flac`, Size: 101},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	found = find(t, orchestrator, want.ID)
+	if found.State != fetch.StateFailed {
+		t.Fatalf("state = %q (%s), want failed without downloading the single", found.State, found.Error)
+	}
+	if len(slskdFake.enqueuedSeq) != 0 {
+		t.Fatalf("nothing should be enqueued: %+v", slskdFake.enqueuedSeq)
+	}
+}
+
+func TestBestCoveragePeerWinsAndOnlyMatchedFilesEnqueue(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("Battery", "Master of Puppets", "The Thing That Should Not Be", "Orion")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add("metallica", "master of puppets", 1986, "")
+	orchestrator.Tick(context.Background())
+	found := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[found.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{
+			Username:          "singlepeer",
+			HasFreeUploadSlot: true,
+			Files: []slskd.File{
+				{Filename: `single\Master of Puppets.flac`, Size: 100},
+				{Filename: `single\Welcome Home (Sanitarium).flac`, Size: 101},
+			},
+		},
+		{
+			Username: "albumpeer",
+			Files: []slskd.File{
+				{Filename: `MoP\01 - Battery.flac`, Size: 200},
+				{Filename: `MoP\02 - Master of Puppets.flac`, Size: 201},
+				{Filename: `MoP\03 - The Thing That Should Not Be.flac`, Size: 202},
+				{Filename: `MoP\04 - Orion.flac`, Size: 203},
+			},
+		},
+	}
+	orchestrator.Tick(context.Background())
+	found = find(t, orchestrator, want.ID)
+	if found.State != fetch.StateDownloading {
+		t.Fatalf("state = %q (%s), want downloading", found.State, found.Error)
+	}
+	if found.Peer != "albumpeer" {
+		t.Fatalf("peer = %q, want albumpeer", found.Peer)
+	}
+	if len(found.Enqueued) != 4 {
+		t.Fatalf("enqueued %d files, want 4", len(found.Enqueued))
+	}
+}
+
+func TestSplitMultiDiscDirectoriesPoolTogether(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("CD1 A", "CD1 B", "CD2 C", "CD2 D")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add("someartist", "somealbum", 0, "")
+	orchestrator.Tick(context.Background())
+	found := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[found.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "splitpeer",
+		Files: []slskd.File{
+			{Filename: `Album\CD1\01 - CD1 A.flac`, Size: 100},
+			{Filename: `Album\CD1\02 - CD1 B.flac`, Size: 101},
+			{Filename: `Album\CD2\01 - CD2 C.flac`, Size: 102},
+			{Filename: `Album\CD2\02 - CD2 D.flac`, Size: 103},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	found = find(t, orchestrator, want.ID)
+	if found.State != fetch.StateDownloading || found.Peer != "splitpeer" {
+		t.Fatalf("state = %q peer = %q (%s), want split directories pooled", found.State, found.Peer, found.Error)
+	}
+	if len(found.Enqueued) != 4 {
+		t.Fatalf("enqueued %d, want 4", len(found.Enqueued))
+	}
+}
