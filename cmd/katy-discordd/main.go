@@ -12,6 +12,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"doppel.moe/katydid/internal/discord"
+	"doppel.moe/katydid/internal/navidrome"
 )
 
 func main() {
@@ -36,6 +37,10 @@ func run() error {
 	if defaultKatyd == "" {
 		defaultKatyd = "/run/katyd/katyd.sock"
 	}
+	defaultNavUser := os.Getenv("NAVIDROME_USERNAME")
+	defaultNavPass := os.Getenv("NAVIDROME_PASSWORD")
+	defaultNavBase := os.Getenv("NAVIDROME_BASE_URL")
+	defaultNavPort := os.Getenv("NAVIDROME_PORT")
 
 	token := flag.String("token", defaultToken, "discord bot token")
 	appID := flag.String("app-id", defaultAppID, "discord application id")
@@ -57,7 +62,18 @@ func run() error {
 	}
 	session.Identify.Intents = discordgo.MakeIntent(discordgo.IntentsGuilds)
 
-	bot := discord.NewBot(discord.NewKatyd(*katydSocket), discord.NewFetchd(*fetchdSocket),
+	var navd discord.Navidrome
+	navdStatus := "disabled"
+	if defaultNavUser != "" && defaultNavPass != "" {
+		base, err := navidrome.BaseURL(defaultNavBase, defaultNavPort)
+		if err != nil {
+			return err
+		}
+		navd = navidrome.New(base, defaultNavUser, defaultNavPass)
+		navdStatus = base
+	}
+
+	bot := discord.NewBot(discord.NewKatyd(*katydSocket), discord.NewFetchd(*fetchdSocket), navd,
 		discord.Config{AppID: *appID, GuildID: *guild})
 	session.AddHandler(bot.OnReady)
 	session.AddHandler(bot.OnInteraction)
@@ -66,8 +82,8 @@ func run() error {
 		return fmt.Errorf("open gateway: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "katy-discordd: app %s, guild %q, katyd %s, fetchd %s\n",
-		*appID, *guild, *katydSocket, *fetchdSocket)
+	fmt.Fprintf(os.Stderr, "katy-discordd: app %s, guild %q, katyd %s, fetchd %s, navidrome %s\n",
+		*appID, *guild, *katydSocket, *fetchdSocket, navdStatus)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

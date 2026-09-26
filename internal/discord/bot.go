@@ -24,12 +24,19 @@ type Config struct {
 	GuildID string
 }
 
+// Navidrome refreshes the music server after imports and mints
+// share links; a nil Navidrome disables the feature.
+type Navidrome interface {
+	RefreshAndShare(ctx context.Context, artist, album string) (string, error)
+}
+
 type Bot struct {
-	katyd   *Katyd
-	fetchd  *Fetchd
-	appID   string
-	guildID string
-	cmds    []*discordgo.ApplicationCommand
+	katyd     *Katyd
+	fetchd    *Fetchd
+	navidrome Navidrome
+	appID     string
+	guildID   string
+	cmds      []*discordgo.ApplicationCommand
 
 	mu        sync.Mutex
 	pending   map[string]addSpec            // followup message id -> original command spec
@@ -39,11 +46,12 @@ type Bot struct {
 	cancel    context.CancelFunc
 }
 
-func NewBot(katyd *Katyd, fetchd *Fetchd, cfg Config) *Bot {
+func NewBot(katyd *Katyd, fetchd *Fetchd, navidrome Navidrome, cfg Config) *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Bot{
 		katyd:     katyd,
 		fetchd:    fetchd,
+		navidrome: navidrome,
 		appID:     cfg.AppID,
 		guildID:   cfg.GuildID,
 		cmds:      commands(),
@@ -278,11 +286,11 @@ func (b *Bot) onPick(s *discordgo.Session, i *discordgo.InteractionCreate, relea
 		return
 	}
 	b.updateWebhook(s, i.Interaction.Token, componentMessageID(i), statusLine(want))
-	b.startPoll(s, i.Interaction.Token, want)
+	b.startPoll(s, i.Interaction.Token, want, spec.Ephemeral)
 }
 
 // poll drives the deferred response (@original) with live want status.
-func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID string) {
+func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID string, ephemeral bool) {
 	defer b.untrack(token)
 	deadline := time.NewTimer(pollBudget)
 	defer deadline.Stop()
@@ -311,12 +319,30 @@ func (b *Bot) poll(s *discordgo.Session, ctx context.Context, token, wantID stri
 			last = line
 		}
 		if terminalState(w.State) {
+			if w.State == stateImported && b.navidrome != nil {
+				b.postShare(s, token, w, ephemeral)
+			}
 			return
 		}
 	}
 }
 
-func (b *Bot) startPoll(s *discordgo.Session, token string, want Want) {
+// postShare follows up a successful import with a navidrome share link.
+func (b *Bot) postShare(s *discordgo.Session, token string, w Want, ephemeral bool) {
+	ctx, cancel := context.WithTimeout(b.root, 5*time.Minute)
+	defer cancel()
+	url, err := b.navidrome.RefreshAndShare(ctx, w.Artist, w.Album)
+	content := "navidrome share (downloads on): " + url
+	if err != nil {
+		content = "navidrome: " + err.Error()
+	}
+	_, err = s.WebhookExecute(b.appID, token, true, &discordgo.WebhookParams{Content: content, Flags: ephemeralFlags(ephemeral), AllowedMentions: noMentions()})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "katy-discordd: share followup: %v\n", err)
+	}
+}
+
+func (b *Bot) startPoll(s *discordgo.Session, token string, want Want, ephemeral bool) {
 	b.mu.Lock()
 	if _, dup := b.polls[token]; dup {
 		b.mu.Unlock()
@@ -325,7 +351,7 @@ func (b *Bot) startPoll(s *discordgo.Session, token string, want Want) {
 	ctx, cancel := context.WithCancel(b.root)
 	b.polls[token] = cancel
 	b.mu.Unlock()
-	go b.poll(s, ctx, token, want.ID)
+	go b.poll(s, ctx, token, want.ID, ephemeral)
 }
 
 func (b *Bot) untrack(token string) {
