@@ -596,7 +596,8 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			w.Slots = pick.slots
 			w.Enqueued = pick.plan
 		} else {
-			// swap dead files for their re-sourced replacements
+			// swap dead files for their re-sourced replacements; their
+			// stale owner/slot entries go with them
 			live := map[string]bool{}
 			for _, file := range w.Enqueued {
 				if _, dead := w.Excluded[file.Filename]; !dead {
@@ -607,6 +608,9 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			for _, file := range w.Enqueued {
 				if live[file.Filename] {
 					kept = append(kept, file)
+				} else {
+					delete(w.Owners, file.Filename)
+					delete(w.Slots, file.Filename)
 				}
 			}
 			for _, file := range pick.plan {
@@ -624,8 +628,10 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 		}
 		w.RemoteDir = remoteParent(w.Enqueued[0].Filename)
 		w.State = StateDownloading
-		if len(batches) > 1 || len(w.Owners) > 1 {
-			w.Notes = append(w.Notes, fmt.Sprintf("pooling %d peers for the flac album", len(w.Owners)))
+		// pooling is worth one note at plan time only; failover churn
+		// already notes each moved file
+		if len(w.Enqueued) == len(pick.plan) && len(batches) > 1 {
+			w.Notes = append(w.Notes, fmt.Sprintf("pooling %d peers, ~%d tracks each", len(batches), len(pick.plan)/len(batches)))
 		}
 		return nil
 	})
@@ -691,15 +697,18 @@ func failoverPlan(w *Want, search *slskd.Search) (pickAssignments, error) {
 		if len(options) == 0 {
 			continue
 		}
+		// prefer the peer already carrying the most live slots of this
+		// want: lane reuse beats opening new ones
+		load := map[string]int{}
+		for _, live := range w.Enqueued {
+			if owner, ok := w.Owners[live.Filename]; ok && !liveFileDead(w, live.Filename) {
+				load[owner]++
+			}
+		}
 		chosen := options[0]
 		for _, c := range options[1:] {
-			// prefer a peer already carrying slots of this want: lane
-			// reuse beats opening new ones
-			for _, owned := range w.Owners {
-				if owned == c.peer && w.Owners[file.Filename] != c.peer {
-					chosen = c
-					break
-				}
+			if load[c.peer] > load[chosen.peer] || (load[c.peer] == load[chosen.peer] && c.peer < chosen.peer) {
+				chosen = c
 			}
 		}
 		plan.plan = append(plan.plan, chosen.file)
@@ -914,6 +923,12 @@ func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) e
 		}
 	}
 	return o.beginSearch(ctx, w)
+}
+
+// liveFileDead reports whether a want's file is marked for failover.
+func liveFileDead(w *Want, filename string) bool {
+	_, dead := w.Excluded[filename]
+	return dead
 }
 
 // failureReason extracts a transfer's exception, defaulting sensibly.
@@ -1204,7 +1219,12 @@ type pickAssignments struct {
 
 // maxPoolLanes caps how many peers share one want: more lanes than
 // this buy little and lean hard on the network's goodwill.
-const maxPoolLanes = 4
+// minPoolShare rejects pools where a lane would carry fewer than two
+// tracks on average: pooling single songs leans on peers for nothing.
+const (
+	maxPoolLanes = 4
+	minPoolShare = 2
+)
 
 // offer is one peer's response, scored for source picking.
 type offer struct {
@@ -1306,20 +1326,25 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 }
 
 // assembleFlacPool splits the album across all-flac sources when their
-// union covers every track: offers already carry each peer's flac
-// subset in score order, and lanes are admitted only while they add
-// coverage, up to maxPoolLanes. Any gap, or a pool too small to matter,
+// union covers every track: offers are taken biggest-first so lanes
+// fill with large contributors, capped at maxPoolLanes. Any gap, or a
+// pool whose lanes would average fewer than minPoolShare tracks,
 // falls back to single-host picking.
 func assembleFlacPool(offers []offer, titles []string) (pickAssignments, error) {
 	if len(offers) < 2 {
 		return pickAssignments{}, errors.New("pool needs multiple peers")
 	}
+	byFlac := make([]offer, len(offers))
+	copy(byFlac, offers)
+	sort.SliceStable(byFlac, func(i, j int) bool {
+		return len(byFlac[i].flac) > len(byFlac[j].flac)
+	})
 	covered := map[int]bool{}
 	plan := []slskd.File{}
 	owners := map[string]string{}
 	slots := map[string]int{}
 	used := map[string]bool{}
-	for _, offer := range offers {
+	for _, offer := range byFlac {
 		if len(used) >= maxPoolLanes {
 			break
 		}
@@ -1344,6 +1369,9 @@ func assembleFlacPool(offers []offer, titles []string) (pickAssignments, error) 
 	}
 	if len(plan) < len(titles) {
 		return pickAssignments{}, fmt.Errorf("flac pool covers %d of %d tracks", len(plan), len(titles))
+	}
+	if len(plan) < minPoolShare*len(used) {
+		return pickAssignments{}, fmt.Errorf("flac pool is too fragmented: %d tracks over %d peers", len(plan), len(used))
 	}
 	sort.Slice(plan, func(i, j int) bool {
 		return remoteName(plan[i].Filename) < remoteName(plan[j].Filename)
