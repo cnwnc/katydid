@@ -223,10 +223,10 @@ type apiTrack struct {
 }
 
 type apiAlbum struct {
-	Name      string `json:"name"`
-	Artist    string `json:"artist"`
-	MBID      string `json:"mbid"`
-	URL       string `json:"url"`
+	Name      string  `json:"name"`
+	Artist    string  `json:"artist"`
+	MBID      string  `json:"mbid"`
+	URL       string  `json:"url"`
 	Listeners flexInt `json:"listeners"`
 	Tracks    *struct {
 		Track []apiTrack `json:"track"`
