@@ -68,11 +68,16 @@ type Want struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	Candidates    []match.Candidate `json:"candidates,omitempty"`
-	SearchID      string            `json:"search_id,omitempty"`
-	Peer          string            `json:"peer,omitempty"`
-	RemoteDir     string            `json:"remote_dir,omitempty"`
-	Enqueued      []slskd.File      `json:"enqueued,omitempty"`
+	Candidates []match.Candidate `json:"candidates,omitempty"`
+	SearchID   string            `json:"search_id,omitempty"`
+	Peer       string            `json:"peer,omitempty"`
+	RemoteDir  string            `json:"remote_dir,omitempty"`
+	Enqueued   []slskd.File      `json:"enqueued,omitempty"`
+	// Paths binds each enqueued remote file to its local location once
+	// the transfer is seen finished; StagingDir is the assembled handoff
+	// directory (symlinks) katyd imports from.
+	Paths         map[string]string `json:"paths,omitempty"`
+	StagingDir    string            `json:"staging_dir,omitempty"`
 	Downloaded    int               `json:"downloaded,omitempty"`
 	DecisionToken string            `json:"decision_token,omitempty"`
 	ExcludedPeers []string          `json:"excluded_peers,omitempty"`
@@ -104,6 +109,9 @@ type Config struct {
 	Slskd        Slskd
 	Katyd        Katyd
 	DownloadsDir string
+	// BindRetry bounds how long a want waits for downloaded files to
+	// turn up on disk before failing; zero means staleAfter.
+	BindRetry time.Duration
 }
 
 // Store persists wants as a single atomically written JSON document; the
@@ -315,7 +323,9 @@ func (o *Orchestrator) Remove(id string) error {
 	for _, candidate := range o.store.Want.Wants {
 		if candidate.ID != id {
 			kept = append(kept, candidate)
+			continue
 		}
+		dropStaging(&candidate)
 	}
 	o.store.Want.Wants = kept
 	return o.store.Save()
@@ -346,6 +356,7 @@ func (o *Orchestrator) withWant(want Want, mutate func(*Want) error) {
 		want.State = StateFailed
 		want.Error = err.Error()
 		o.stopSearch(&want)
+		dropStaging(&want)
 	}
 	o.store.put(want)
 	if err := o.store.Save(); err != nil {
@@ -604,12 +615,15 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 		if succeeded < len(enqueued) {
 			return nil
 		}
-		dir, err := locateDownload(w, o.cfg.DownloadsDir)
-		if err != nil {
+		if err := o.bindPaths(w); err != nil {
 			return err
 		}
+		if w.StagingDir == "" {
+			// slots not fully bound yet; the next tick retries
+			return nil
+		}
 		req := importer.Request{
-			Dir:     dir,
+			Dir:     w.StagingDir,
 			By:      "fetchd",
 			Request: w.ID,
 		}
@@ -627,7 +641,7 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 		}
 		result, err := o.cfg.Katyd.Import(req)
 		if err != nil {
-			return fmt.Errorf("import %s: %w", dir, err)
+			return fmt.Errorf("import %s: %w", w.StagingDir, err)
 		}
 		return o.absorbResult(w, result)
 	})
@@ -640,6 +654,7 @@ func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) e
 	w.ExcludedPeers = append(w.ExcludedPeers, dropped)
 	w.Notes = append(w.Notes, fmt.Sprintf("dropped peer %s: %s", dropped, reason))
 	w.Peer, w.RemoteDir, w.Enqueued, w.Attempts, w.Downloaded = "", "", nil, nil, 0
+	w.Paths = nil
 	if len(w.ExcludedPeers) >= maxPeers {
 		return fmt.Errorf("gave up after %d peers, last %s: %s", len(w.ExcludedPeers), dropped, reason)
 	}
@@ -693,56 +708,112 @@ func (o *Orchestrator) reconcileDecision(ctx context.Context, want Want) {
 	})
 }
 
-// locateDownload maps enqueued remote files to their local directory by
-// scanning the slskd downloads tree for basename+size matches, so no slskd
-// destination configuration is required. Ambiguity fails loud.
-func locateDownload(want *Want, downloadsDir string) (string, error) {
-	wantFiles := map[string]int64{}
-	for _, file := range want.Enqueued {
-		wantFiles[strings.ToLower(filepath.Base(remoteName(file.Filename)))] = file.Size
+// bindPaths resolves the local path of every enqueued file: slots stay
+// bound to the specific path they were found at, so a later re-download
+// for a different peer cannot mix copies. Ambiguous matches fail loud;
+// missing files retry until the bind window closes, since slskd can
+// mark a transfer complete a beat before the file is settled.
+func (o *Orchestrator) bindPaths(w *Want) error {
+	missing := []string{}
+	ambiguous := []string{}
+	found := map[string]string{}
+	for _, file := range w.Enqueued {
+		name := strings.ToLower(filepath.Base(remoteName(file.Filename)))
+		if _, bound := w.Paths[file.Filename]; bound {
+			continue
+		}
+		var matches []string
+		err := filepath.WalkDir(o.cfg.DownloadsDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.EqualFold(entry.Name(), name) {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Size() == file.Size {
+				matches = append(matches, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("scan downloads %s: %w", o.cfg.DownloadsDir, err)
+		}
+		switch {
+		case len(matches) == 1:
+			found[file.Filename] = matches[0]
+		case len(matches) > 1:
+			ambiguous = append(ambiguous, fmt.Sprintf("%s found at %s and %s", name, matches[0], matches[1]))
+		default:
+			missing = append(missing, fmt.Sprintf("%s (%d bytes)", name, file.Size))
+		}
 	}
-	matches := map[string]int{}
-	err := filepath.WalkDir(downloadsDir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	if len(ambiguous) > 0 {
+		return fmt.Errorf("duplicate downloads, delete the stale copy: %s", strings.Join(ambiguous, "; "))
+	}
+	if len(missing) > 0 {
+		retry := o.cfg.BindRetry
+		if retry == 0 {
+			retry = staleAfter
 		}
-		if entry.IsDir() {
-			return nil
+		if time.Since(w.UpdatedAt) > retry {
+			return fmt.Errorf("%d of %d downloaded files never turned up on disk after %s: %s", len(missing), len(w.Enqueued), retry, strings.Join(missing, ", "))
 		}
-		size, wanted := wantFiles[strings.ToLower(entry.Name())]
-		if !wanted {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if info.Size() != size {
-			return nil
-		}
-		matches[filepath.Dir(path)]++
 		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("scan downloads %s: %w", downloadsDir, err)
 	}
-	best, bestCount := "", 0
-	ties := []string{}
-	for dir, count := range matches {
-		if count > bestCount {
-			best, bestCount = dir, count
-			ties = nil
-		} else if count == bestCount {
-			ties = append(ties, dir)
+	if w.Paths == nil {
+		w.Paths = map[string]string{}
+	}
+	for name, path := range found {
+		w.Paths[name] = path
+	}
+	if len(w.Paths) < len(w.Enqueued) {
+		return nil
+	}
+	stage, err := stageFiles(w.Paths, w.Enqueued)
+	if err != nil {
+		return err
+	}
+	w.StagingDir = stage
+	return nil
+}
+
+// stageFiles assembles the handoff directory: one symlink per bound
+// file, katyd follows them when it copies into the library. Basename
+// collisions (multi-disc reuses) get a numeric infix like slskd's own.
+func stageFiles(paths map[string]string, enqueued []slskd.File) (string, error) {
+	stage, err := os.MkdirTemp("", "katydid-fetchd-*")
+	if err != nil {
+		return "", fmt.Errorf("create staging dir: %w", err)
+	}
+	used := map[string]bool{}
+	for _, file := range enqueued {
+		base := filepath.Base(remoteName(file.Filename))
+		number := 1
+		for used[base] {
+			ext := filepath.Ext(base)
+			stem := strings.TrimSuffix(base, ext)
+			base = fmt.Sprintf("%s.%d%s", stem, number, ext)
+			number++
+		}
+		used[base] = true
+		if err := os.Symlink(paths[file.Filename], filepath.Join(stage, base)); err != nil {
+			os.RemoveAll(stage)
+			return "", fmt.Errorf("stage %s: %w", base, err)
 		}
 	}
-	if bestCount == 0 {
-		return "", fmt.Errorf("no downloaded files found under %s", downloadsDir)
+	return stage, nil
+}
+
+// dropStaging removes a want's handoff directory once nothing needs it.
+func dropStaging(w *Want) {
+	if w.StagingDir != "" {
+		os.RemoveAll(w.StagingDir)
+		w.StagingDir = ""
 	}
-	if len(ties) > 0 || bestCount < len(wantFiles) {
-		return "", fmt.Errorf("ambiguous download location: %d of %d files in %s", bestCount, len(wantFiles), best)
-	}
-	return best, nil
 }
 
 // pickSource chooses the peer directory that best matches the release.
@@ -905,14 +976,17 @@ func (o *Orchestrator) absorbResult(want *Want, result importer.Result) error {
 		want.State = StateImported
 		want.AlbumID = result.AlbumID
 		want.DecisionToken = ""
+		dropStaging(want)
 	case "needs_decision":
 		if result.Decision == nil {
 			return errors.New("katyd returned needs_decision without a token")
 		}
+		// the staged files must survive until the decision resolves
 		want.State = StateNeedsPick
 		want.DecisionToken = result.Decision.Token
 	case "skipped":
 		want.State = StateSkipped
+		dropStaging(want)
 	default:
 		return fmt.Errorf("unexpected import status %q", result.Status)
 	}
