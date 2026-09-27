@@ -615,12 +615,9 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 			byName[transfer.Filename] = transfer
 		}
-		if len(byName) < len(enqueued) {
-			if time.Since(w.UpdatedAt) > staleAfter {
-				return fmt.Errorf("only %d of %d transfers visible after %s", len(byName), len(enqueued), staleAfter)
-			}
+		if len(byName) < len(enqueued) && time.Since(want.CreatedAt) > staleAfter {
+			return fmt.Errorf("only %d of %d transfers visible after %s", len(byName), len(enqueued), staleAfter)
 		}
-		succeeded := 0
 		failed := []slskd.Transfer{}
 		for name := range enqueued {
 			transfer, visible := byName[name]
@@ -629,14 +626,22 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 			switch {
 			case slskd.TransferSucceeded(transfer.State):
-				succeeded++
 				delete(w.Attempts, name)
 			case slskd.TransferFailed(transfer.State):
-				failed = append(failed, transfer)
+				// a file already bound from disk is done, whatever the
+				// transfer list still claims about it
+				if _, bound := w.Paths[name]; !bound {
+					failed = append(failed, transfer)
+				}
 			}
 		}
-		w.Downloaded = succeeded
-		if len(failed) > 0 {
+		// disk truth first: files on disk bind and import even when
+		// slskd's queue is jammed, was cleared, or still reports errors
+		if err := o.bindPaths(w); err != nil {
+			return err
+		}
+		w.Downloaded = len(w.Paths)
+		if w.StagingDir == "" && len(failed) > 0 {
 			if w.Attempts == nil {
 				w.Attempts = map[string]int{}
 			}
@@ -660,11 +665,6 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 			w.Notes = append(w.Notes, "re-enqueued "+summary)
 			return nil
-		}
-		// slots bind as their transfers finish, so one slow file never
-		// blocks the rest; nothing imports until every slot is bound
-		if err := o.bindPaths(w); err != nil {
-			return err
 		}
 		if w.StagingDir == "" {
 			return nil
@@ -695,9 +695,15 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 }
 
 // switchPeer drops the current peer and goes back to source picking,
-// reusing the finished search when slskd still has it. The dropped
-// peer's files are junk (copies from a fresh peer differ) and go with it.
+// reusing the finished search when slskd still has it. A want with
+// staged files never switches: switching re-picks a different peer's
+// directory and the staged files are bound to slots already, so the
+// want holds instead and keeps retrying the rest on this peer.
 func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) error {
+	if len(w.Paths) > 0 {
+		w.Notes = append(w.Notes, fmt.Sprintf("peer %s failed but %d file(s) already staged; holding", w.Peer, len(w.Paths)))
+		return nil
+	}
 	dropped := w.Peer
 	w.ExcludedPeers = append(w.ExcludedPeers, dropped)
 	w.Notes = append(w.Notes, fmt.Sprintf("dropped peer %s: %s", dropped, reason))
@@ -782,6 +788,11 @@ func (o *Orchestrator) bindPaths(w *Want) error {
 		var matches []string
 		err := filepath.WalkDir(o.cfg.DownloadsDir, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
+				// a not-yet-existing downloads tree holds nothing; that
+				// is the normal state before any download lands
+				if os.IsNotExist(err) {
+					return nil
+				}
 				return err
 			}
 			if entry.IsDir() || !strings.EqualFold(entry.Name(), name) {
@@ -910,11 +921,18 @@ func (o *Orchestrator) purgeDownloads(w *Want) {
 		}
 		if err := os.Remove(path); err == nil {
 			dirs[filepath.Dir(path)] = true
+		} else if !os.IsNotExist(err) {
+			// a purge that cannot delete is how a tmpfs tree fills up
+			// unnoticed; it must be loud
+			fmt.Fprintf(os.Stderr, "fetchd: purge %s: %v\n", path, err)
 		}
 	}
 	for dir := range dirs {
 		for dir != o.cfg.DownloadsDir && strings.HasPrefix(dir, o.cfg.DownloadsDir) {
-			if os.Remove(dir) != nil {
+			if err := os.Remove(dir); err != nil {
+				if !os.IsNotExist(err) {
+					fmt.Fprintf(os.Stderr, "fetchd: purge dir %s: %v\n", dir, err)
+				}
 				break
 			}
 			dir = filepath.Dir(dir)

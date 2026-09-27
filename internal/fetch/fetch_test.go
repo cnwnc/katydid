@@ -464,6 +464,83 @@ func TestNeedsDecisionExpiresAfterADay(t *testing.T) {
 	}
 }
 
+func TestZombieTransfersBindFromDisk(t *testing.T) {
+	// the tmpfs-fill incident: slskd's transfer entries never went
+	// terminal, but every file is on disk — the want must finish anyway
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "x"}
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+	}}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	os.WriteFile(filepath.Join(localDir, "01 - vault.flac"), make([]byte, 500), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Queued"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateImported {
+		t.Fatalf("files on disk should import despite zombie transfers: state %q err %q", w.State, w.Error)
+	}
+}
+
+func TestPeerSwitchKeepsStagedFiles(t *testing.T) {
+	// one slot bound, one permanently failing: exhausting retries must
+	// hold the want, never delete the staged file to switch peers
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+		{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900},
+	}}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	staged := filepath.Join(localDir, "01 - vault.flac")
+	os.WriteFile(staged, make([]byte, 500), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900, State: "Completed, Errored", Exception: strPtr("File not shared.")},
+	}}}}}
+	for i := 0; i < 4; i++ {
+		orchestrator.Tick(context.Background())
+		w = find(t, orchestrator, want.ID)
+		if w.State != fetch.StateDownloading {
+			t.Fatalf("tick %d: state %q err %q, want still downloading and holding", i+1, w.State, w.Error)
+		}
+		if len(w.ExcludedPeers) != 0 {
+			t.Fatalf("tick %d: staged files must prevent a peer switch", i+1)
+		}
+	}
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatalf("staged file must survive: %v", err)
+	}
+	held := false
+	for _, note := range w.Notes {
+		if strings.Contains(note, "already staged") {
+			held = true
+		}
+	}
+	if !held {
+		t.Fatalf("notes should explain the hold: %+v", w.Notes)
+	}
+}
+
 func TestPinnedGroupSkipsGroupSearch(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")
