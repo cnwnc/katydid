@@ -495,7 +495,9 @@ func TestZombieTransfersBindFromDisk(t *testing.T) {
 
 func TestPeerSwitchKeepsStagedFiles(t *testing.T) {
 	// one slot bound, one permanently failing: exhausting retries must
-	// hold the want, never delete the staged file to switch peers
+	// one slot bound, one permanently failing: exhausting retries hands
+	// just that slot to failover (searching), never touching the staged
+	// file and never switching the whole want
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit")
 	orchestrator, root := harness(t, slskdFake, katydFake)
@@ -504,10 +506,15 @@ func TestPeerSwitchKeepsStagedFiles(t *testing.T) {
 	w := find(t, orchestrator, want.ID)
 	search := slskdFake.searches[w.SearchID]
 	search.IsComplete = true
-	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
-		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
-		{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900},
-	}}}
+	search.Responses = []slskd.Response{
+		{Username: "peer", Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900},
+		}},
+		{Username: "other", Files: []slskd.File{
+			{Filename: `x\saetia\02 - orbit (other rip).flac`, Size: 910},
+		}},
+	}
 	orchestrator.Tick(context.Background())
 	localDir := filepath.Join(root, "downloads", "SAETIA")
 	os.MkdirAll(localDir, 0o755)
@@ -517,27 +524,185 @@ func TestPeerSwitchKeepsStagedFiles(t *testing.T) {
 		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
 		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900, State: "Completed, Errored", Exception: strPtr("File not shared.")},
 	}}}}}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 3; i++ {
 		orchestrator.Tick(context.Background())
 		w = find(t, orchestrator, want.ID)
 		if w.State != fetch.StateDownloading {
-			t.Fatalf("tick %d: state %q err %q, want still downloading and holding", i+1, w.State, w.Error)
+			t.Fatalf("tick %d: state %q err %q, want still retrying", i+1, w.State, w.Error)
 		}
 		if len(w.ExcludedPeers) != 0 {
-			t.Fatalf("tick %d: staged files must prevent a peer switch", i+1)
+			t.Fatalf("tick %d: a single file failure must not switch the peer", i+1)
 		}
 	}
 	if _, err := os.Stat(staged); err != nil {
 		t.Fatalf("staged file must survive: %v", err)
 	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateSearching || len(w.Excluded) != 1 || w.Excluded[`dir\SAETIA\02 - orbit.flac`] != "peer" {
+		t.Fatalf("fourth failure should hand the slot to failover: state %q excluded %v", w.State, w.Excluded)
+	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateDownloading || w.Owners[`x\saetia\02 - orbit (other rip).flac`] != "other" {
+		t.Fatalf("orbit should be re-sourced from other: state %q owners %v err %q", w.State, w.Owners, w.Error)
+	}
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatalf("staged file must survive failover: %v", err)
+	}
+	if len(w.Enqueued) != 2 {
+		t.Fatalf("enqueued should be 2 (1 kept + 1 re-sourced): %d", len(w.Enqueued))
+	}
+}
+
+func TestFlacPoolSplitsAcrossPeers(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	// neither peer alone covers the album; the flac union does
+	search.Responses = []slskd.Response{
+		{Username: "halfa", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `a\SAETIA\01 - vault.flac`, Size: 9},
+		}},
+		{Username: "halfb", Files: []slskd.File{
+			{Filename: `b\saetia\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "lossy", Files: []slskd.File{
+			{Filename: `c\saetia\01 - vault.mp3`, Size: 5},
+			{Filename: `c\saetia\02 - orbit.mp3`, Size: 6},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateDownloading {
+		t.Fatalf("state %q err %q", w.State, w.Error)
+	}
+	if w.Owners[`a\SAETIA\01 - vault.flac`] != "halfa" || w.Owners[`b\saetia\02 - orbit.flac`] != "halfb" {
+		t.Fatalf("flac slots should split across the two flac peers: %v", w.Owners)
+	}
+	if len(slskdFake.enqueued["halfa"]) != 1 || len(slskdFake.enqueued["halfb"]) != 1 {
+		t.Fatalf("each pool peer should carry one file: %v", slskdFake.enqueued)
+	}
+	if len(slskdFake.enqueued["lossy"]) != 0 {
+		t.Fatalf("lossy host must never join a flac pool: %v", slskdFake.enqueued["lossy"])
+	}
 	held := false
 	for _, note := range w.Notes {
-		if strings.Contains(note, "already staged") {
+		if strings.Contains(note, "pooling") {
 			held = true
 		}
 	}
 	if !held {
-		t.Fatalf("notes should explain the hold: %+v", w.Notes)
+		t.Fatalf("pooling should be noted: %+v", w.Notes)
+	}
+	// both halves land and import as one album
+	os.MkdirAll(filepath.Join(root, "downloads", "a"), 0o755)
+	os.MkdirAll(filepath.Join(root, "downloads", "b"), 0o755)
+	os.WriteFile(filepath.Join(root, "downloads", "a", "01 - vault.flac"), make([]byte, 9), 0o644)
+	os.WriteFile(filepath.Join(root, "downloads", "b", "02 - orbit.flac"), make([]byte, 19), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{
+		{Username: "halfa", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t1", Filename: `a\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		}}}},
+		{Username: "halfb", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t2", Filename: `b\saetia\02 - orbit.flac`, Size: 19, State: "Completed, Succeeded"},
+		}}}},
+	}
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "x"}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateImported {
+		t.Fatalf("pooled album should import: state %q err %q", w.State, w.Error)
+	}
+	if got := katydFake.importDirFiles[0]; len(got) != 2 {
+		t.Fatalf("staged %v, want both pool halves", got)
+	}
+}
+
+func TestFlacGapFallsBackToSingleHost(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	// the flac union misses a track, but a lossy host has everything:
+	// per policy the lossy host takes the whole album, unsplit
+	search.Responses = []slskd.Response{
+		{Username: "halfflac", Files: []slskd.File{
+			{Filename: `a\01 - vault.flac`, Size: 9},
+		}},
+		{Username: "allmp3", Files: []slskd.File{
+			{Filename: `b\01 - vault.mp3`, Size: 5},
+			{Filename: `b\02 - orbit.mp3`, Size: 6},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateDownloading {
+		t.Fatalf("state %q err %q", w.State, w.Error)
+	}
+	if len(slskdFake.enqueued["allmp3"]) != 2 {
+		t.Fatalf("lossy host should carry the whole album: %v", slskdFake.enqueued)
+	}
+	if len(slskdFake.enqueued["halfflac"]) != 0 {
+		t.Fatalf("a flac gap disqualifies the pool entirely: %v", slskdFake.enqueued)
+	}
+	for _, file := range w.Enqueued {
+		if w.Owners[file.Filename] != "allmp3" {
+			t.Fatalf("everything should belong to the lossy host: %v", w.Owners)
+		}
+	}
+}
+
+func TestPoolSlotFailsOverToFlacPeer(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "halfa", Files: []slskd.File{
+			{Filename: `a\01 - vault.flac`, Size: 9},
+		}},
+		{Username: "halfb", Files: []slskd.File{
+			{Filename: `b\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "halfc", Files: []slskd.File{
+			{Filename: `c\01 - vault.flac`, Size: 12},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.Owners[`a\01 - vault.flac`] != "halfa" || w.Owners[`b\02 - orbit.flac`] != "halfb" {
+		t.Fatalf("initial split wrong: %v", w.Owners)
+	}
+	// halfa permanently refuses its file; the slot moves to halfb's
+	// flac backup rip, halfb's own slot untouched
+	slskdFake.downloads = []slskd.UserResponse{{Username: "halfa", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `a\01 - vault.flac`, Size: 9, State: "Completed, Errored", Exception: strPtr("File not shared.")},
+	}}}}}
+	for i := 0; i < 4; i++ {
+		orchestrator.Tick(context.Background())
+	}
+	// tick 5: the failover round re-sources the dead slot
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.Owners[`c\01 - vault.flac`] != "halfc" {
+		t.Fatalf("failed slot should move to halfc's flac: owners %v state %q err %q", w.Owners, w.State, w.Error)
+	}
+	if w.Owners[`b\02 - orbit.flac`] != "halfb" {
+		t.Fatalf("healthy slot should be untouched: %v", w.Owners)
 	}
 }
 
@@ -1027,12 +1192,13 @@ func TestRepeatedFileFailureSwitchesPeer(t *testing.T) {
 	}
 	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
-	if want.State != fetch.StateSearching || len(want.ExcludedPeers) != 1 {
-		t.Fatalf("fourth failure should drop the peer: state %q excluded %v err %q", want.State, want.ExcludedPeers, want.Error)
+	if want.State != fetch.StateSearching || len(want.Excluded) != 1 || want.Excluded[`dir\SAETIA\02 - orbit.flac`] != "peer" {
+		t.Fatalf("fourth failure should fail the slot over: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
 	}
 	orchestrator.Tick(context.Background())
-	if got := find(t, orchestrator, want.ID); got.Peer != "other" {
-		t.Fatalf("should move to other, got %q (%s)", got.Peer, got.Error)
+	got := find(t, orchestrator, want.ID)
+	if got.State != fetch.StateDownloading || got.Owners[`x\saetia\02 orbit.flac`] != "other" {
+		t.Fatalf("orbit should be re-sourced from other: state %q owners %v", got.State, got.Owners)
 	}
 }
 

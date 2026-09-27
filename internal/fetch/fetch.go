@@ -81,13 +81,19 @@ type Want struct {
 	Downloaded    int               `json:"downloaded,omitempty"`
 	DecisionToken string            `json:"decision_token,omitempty"`
 	ExcludedPeers []string          `json:"excluded_peers,omitempty"`
-	// BindSince anchors the retry window for files that finished
-	// transferring but never showed up on disk; UpdatedAt refreshes
-	// every tick and cannot serve as the anchor.
-	BindSince time.Time      `json:"bind_since,omitempty"`
-	AlbumID   string         `json:"album_id,omitempty"`
-	Attempts  map[string]int `json:"attempts,omitempty"`
-	Notes     []string       `json:"notes,omitempty"`
+	// Owners maps each enqueued remote file to the peer it is fetched
+	// from: single-host wants carry one owner for everything, pooled
+	// wants split the album across peers. Slots maps each file to its
+	// track index so failover can re-source one slot without re-picking
+	// the album. Attempts and Excluded track failures per file, so a
+	// dead (file, peer) pair hands that one slot to another peer.
+	Owners    map[string]string `json:"owners,omitempty"`
+	Slots     map[string]int    `json:"slots,omitempty"`
+	Excluded  map[string]string `json:"excluded,omitempty"`
+	BindSince time.Time         `json:"bind_since,omitempty"`
+	AlbumID   string            `json:"album_id,omitempty"`
+	Attempts  map[string]int    `json:"attempts,omitempty"`
+	Notes     []string          `json:"notes,omitempty"`
 }
 
 // Katyd is the slice of the katyd client the orchestrator needs.
@@ -553,22 +559,160 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			}
 			return nil
 		}
-		peer, files, err := pickSource(search, w.TrackTitles, w.TrackCount, w.ExcludedPeers)
-		if err != nil {
-			if len(w.ExcludedPeers) > 0 {
-				return fmt.Errorf("no other peer after dropping %s: %w", strings.Join(w.ExcludedPeers, ", "), err)
+		var pick pickAssignments
+		if len(w.Enqueued) == 0 {
+			fresh, err := pickSource(search, w.TrackTitles, w.TrackCount, w.ExcludedPeers)
+			if err != nil {
+				if len(w.ExcludedPeers) > 0 {
+					return fmt.Errorf("no other peer after dropping %s: %w", strings.Join(w.ExcludedPeers, ", "), err)
+				}
+				return err
 			}
-			return err
+			pick = fresh
+		} else {
+			// failover round: only the slots whose (file, peer) pair died
+			// need re-sourcing; everything bound or healthy is untouched
+			var err error
+			pick, err = failoverPlan(w, search)
+			if err != nil {
+				return err
+			}
+			if len(pick.plan) == 0 {
+				return fmt.Errorf("no source left for %d track(s) after peers failed", len(w.Enqueued)-len(w.Paths))
+			}
 		}
-		if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
-			return fmt.Errorf("enqueue %d files from %s: %w", len(files), peer, err)
+		// grouped per owner: a pool enqueues one batch per peer
+		batches := map[string][]slskd.File{}
+		for _, file := range pick.plan {
+			batches[pick.owners[file.Filename]] = append(batches[pick.owners[file.Filename]], file)
 		}
-		w.Peer = peer
-		w.RemoteDir = remoteParent(files[0].Filename)
-		w.Enqueued = files
+		for peer, files := range batches {
+			if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
+				return fmt.Errorf("enqueue %d files from %s: %w", len(files), peer, err)
+			}
+		}
+		if len(w.Enqueued) == 0 {
+			w.Owners = pick.owners
+			w.Slots = pick.slots
+			w.Enqueued = pick.plan
+		} else {
+			// swap dead files for their re-sourced replacements
+			live := map[string]bool{}
+			for _, file := range w.Enqueued {
+				if _, dead := w.Excluded[file.Filename]; !dead {
+					live[file.Filename] = true
+				}
+			}
+			kept := w.Enqueued[:0]
+			for _, file := range w.Enqueued {
+				if live[file.Filename] {
+					kept = append(kept, file)
+				}
+			}
+			for _, file := range pick.plan {
+				kept = append(kept, file)
+				w.Owners[file.Filename] = pick.owners[file.Filename]
+				w.Slots[file.Filename] = pick.slots[file.Filename]
+			}
+			w.Enqueued = kept
+		}
+		// display peer: the first owner
+		w.Peer = ""
+		for _, file := range w.Enqueued {
+			w.Peer = w.Owners[file.Filename]
+			break
+		}
+		w.RemoteDir = remoteParent(w.Enqueued[0].Filename)
 		w.State = StateDownloading
+		if len(batches) > 1 || len(w.Owners) > 1 {
+			w.Notes = append(w.Notes, fmt.Sprintf("pooling %d peers for the flac album", len(w.Owners)))
+		}
 		return nil
 	})
+}
+
+// failoverPlan re-sources the want's dead slots from the finished
+// search: for each enqueued file marked dead in Excluded, find another
+// peer offering the same track index, preferring peers already in the
+// pool and refusing lossy substitutes for a flac slot.
+func failoverPlan(w *Want, search *slskd.Search) (pickAssignments, error) {
+	type candidate struct {
+		peer string
+		file slskd.File
+	}
+	perIndex := map[int][]candidate{}
+	for _, response := range search.Responses {
+		excludedPeer := false
+		for _, peer := range w.ExcludedPeers {
+			if peer == response.Username {
+				excludedPeer = true
+				break
+			}
+		}
+		if excludedPeer {
+			continue
+		}
+		for _, file := range response.Files {
+			if file.IsLocked || !audioExtensions[strings.ToLower(filepath.Ext(remoteName(file.Filename)))] {
+				continue
+			}
+			idx := fileIndex(file, w.TrackTitles)
+			if idx < 0 {
+				continue
+			}
+			perIndex[idx] = append(perIndex[idx], candidate{peer: response.Username, file: file})
+		}
+	}
+	plan := pickAssignments{owners: map[string]string{}, slots: map[string]int{}}
+	for _, file := range w.Enqueued {
+		deadPeer, dead := w.Excluded[file.Filename]
+		if !dead {
+			continue
+		}
+		index, known := w.Slots[file.Filename]
+		if !known {
+			return plan, fmt.Errorf("no recorded slot for %s; cannot fail over", remoteName(file.Filename))
+		}
+		options := []candidate{}
+		flac := []candidate{}
+		for _, c := range perIndex[index] {
+			if c.peer == deadPeer {
+				continue
+			}
+			options = append(options, c)
+			if strings.EqualFold(filepath.Ext(remoteName(c.file.Filename)), ".flac") {
+				flac = append(flac, c)
+			}
+		}
+		// flac slots stay flac: a lossy stand-in breaks the pool purity
+		if len(flac) > 0 {
+			options = flac
+		}
+		if len(options) == 0 {
+			continue
+		}
+		chosen := options[0]
+		for _, c := range options[1:] {
+			// prefer a peer already carrying slots of this want: lane
+			// reuse beats opening new ones
+			for _, owned := range w.Owners {
+				if owned == c.peer && w.Owners[file.Filename] != c.peer {
+					chosen = c
+					break
+				}
+			}
+		}
+		plan.plan = append(plan.plan, chosen.file)
+		plan.owners[chosen.file.Filename] = chosen.peer
+		plan.slots[chosen.file.Filename] = index
+	}
+	if len(plan.plan) == 0 {
+		return plan, nil
+	}
+	sort.Slice(plan.plan, func(i, j int) bool {
+		return remoteName(plan.plan[i].Filename) < remoteName(plan.plan[j].Filename)
+	})
+	return plan, nil
 }
 
 // maxDownloadRetries bounds how often a failed transfer is re-enqueued
@@ -589,48 +733,47 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 		if err != nil {
 			return fmt.Errorf("poll transfers: %w", err)
 		}
-		var transfers []slskd.Transfer
+		// transfers are matched per owning peer: in a pool, peer A's
+		// copy of a filename has nothing to do with peer B's
+		byOwner := map[string]map[string]slskd.Transfer{}
 		for _, user := range users {
-			if user.Username != w.Peer {
-				continue
-			}
 			for _, directory := range user.Directories {
-				transfers = append(transfers, directory.Files...)
+				for _, transfer := range directory.Files {
+					owner := w.Owners[transfer.Filename]
+					if owner == "" {
+						owner = w.Peer
+					}
+					if owner != user.Username {
+						continue
+					}
+					if byOwner[owner] == nil {
+						byOwner[owner] = map[string]slskd.Transfer{}
+					}
+					// re-enqueued files appear twice; the newest entry wins
+					if existing, ok := byOwner[owner][transfer.Filename]; ok && existing.RequestedAt.After(transfer.RequestedAt.Time) {
+						continue
+					}
+					byOwner[owner][transfer.Filename] = transfer
+				}
 			}
-		}
-		enqueued := map[string]int64{}
-		filesByName := map[string]slskd.File{}
-		for _, file := range w.Enqueued {
-			enqueued[file.Filename] = file.Size
-			filesByName[file.Filename] = file
-		}
-		byName := map[string]slskd.Transfer{}
-		for _, transfer := range transfers {
-			if _, wanted := enqueued[transfer.Filename]; !wanted {
-				continue
-			}
-			// re-enqueued files appear twice; the newest entry wins
-			if existing, ok := byName[transfer.Filename]; ok && existing.RequestedAt.After(transfer.RequestedAt.Time) {
-				continue
-			}
-			byName[transfer.Filename] = transfer
-		}
-		if len(byName) < len(enqueued) && time.Since(want.CreatedAt) > staleAfter {
-			return fmt.Errorf("only %d of %d transfers visible after %s", len(byName), len(enqueued), staleAfter)
 		}
 		failed := []slskd.Transfer{}
-		for name := range enqueued {
-			transfer, visible := byName[name]
+		for _, file := range w.Enqueued {
+			owner := w.Owners[file.Filename]
+			if owner == "" {
+				owner = w.Peer
+			}
+			transfer, visible := byOwner[owner][file.Filename]
 			if !visible {
 				continue
 			}
 			switch {
 			case slskd.TransferSucceeded(transfer.State):
-				delete(w.Attempts, name)
+				delete(w.Attempts, file.Filename)
 			case slskd.TransferFailed(transfer.State):
 				// a file already bound from disk is done, whatever the
 				// transfer list still claims about it
-				if _, bound := w.Paths[name]; !bound {
+				if _, bound := w.Paths[file.Filename]; !bound {
 					failed = append(failed, transfer)
 				}
 			}
@@ -642,28 +785,79 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 		}
 		w.Downloaded = len(w.Paths)
 		if w.StagingDir == "" && len(failed) > 0 {
+			// a whole-album refusal with nothing staged is a blocked
+			// peer: switch immediately instead of re-asking it
+			wholeRefusal := len(w.Paths) == 0 && len(failed) == len(w.Enqueued)
+			oneOwner := true
+			for _, transfer := range failed {
+				owner := w.Owners[transfer.Filename]
+				if owner == "" {
+					owner = w.Peer
+				}
+				if owner != w.Owners[failed[0].Filename] && w.Owners[failed[0].Filename] != "" {
+					oneOwner = false
+					break
+				}
+			}
+			if wholeRefusal && oneOwner {
+				summary := failureSummary(failed, len(w.Enqueued))
+				return o.switchPeer(ctx, w, summary)
+			}
 			if w.Attempts == nil {
 				w.Attempts = map[string]int{}
 			}
-			exhausted := false
 			retry := []slskd.File{}
+			perFile := []string{}
 			for _, transfer := range failed {
 				w.Attempts[transfer.Filename]++
-				if w.Attempts[transfer.Filename] > maxDownloadRetries {
-					exhausted = true
+				file := slskd.File{Filename: transfer.Filename, Size: transfer.Size}
+				if attempts := w.Attempts[transfer.Filename]; attempts > maxDownloadRetries {
+					// per-file failover: mark this file off-limits for
+					// its owner and let the next search round hand it to
+					// another peer; the rest of the pool is untouched
+					owner := w.Owners[transfer.Filename]
+					if owner == "" {
+						owner = w.Peer
+					}
+					if w.Excluded == nil {
+						w.Excluded = map[string]string{}
+					}
+					if w.Excluded[transfer.Filename] == "" {
+						w.Excluded[transfer.Filename] = owner
+						w.Notes = append(w.Notes, fmt.Sprintf("file %s given up on %s: %s", remoteName(transfer.Filename), owner, failureReason(transfer)))
+					}
+					continue
 				}
-				retry = append(retry, filesByName[transfer.Filename])
+				retry = append(retry, file)
+				perFile = append(perFile, fmt.Sprintf("%s: %s", remoteName(transfer.Filename), failureReason(transfer)))
 			}
-			summary := failureSummary(failed, len(enqueued))
-			// a peer refusing the whole album at once is blocking it, and a
-			// file that keeps failing will not come from this peer either
-			if exhausted || len(failed) == len(enqueued) {
-				return o.switchPeer(ctx, w, summary)
+			if len(retry) > 0 {
+				batches := map[string][]slskd.File{}
+				for _, file := range retry {
+					owner := w.Owners[file.Filename]
+					if owner == "" {
+						owner = w.Peer
+					}
+					batches[owner] = append(batches[owner], file)
+				}
+				for peer, files := range batches {
+					if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
+						return fmt.Errorf("re-enqueue %d failed files: %w", len(files), err)
+					}
+				}
+				w.Notes = append(w.Notes, "re-enqueued "+strings.Join(perFile, "; "))
 			}
-			if err := o.cfg.Slskd.EnqueueDownloads(ctx, w.Peer, retry); err != nil {
-				return fmt.Errorf("re-enqueue %d failed files: %w", len(retry), err)
+			if len(w.Excluded) >= maxPeers {
+				// every slot has burned through its peers
+				missing := len(w.Enqueued) - len(w.Paths)
+				return fmt.Errorf("gave up after %d file(s) exhausted their peers; %d track(s) unsourced", len(w.Excluded), missing)
 			}
-			w.Notes = append(w.Notes, "re-enqueued "+summary)
+			if len(retry) == 0 && len(w.Excluded) > 0 {
+				// some slots need a new peer: back to the search for a
+				// failover round (bound files are untouched)
+				w.State = StateSearching
+				return nil
+			}
 			return nil
 		}
 		if w.StagingDir == "" {
@@ -720,6 +914,14 @@ func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) e
 		}
 	}
 	return o.beginSearch(ctx, w)
+}
+
+// failureReason extracts a transfer's exception, defaulting sensibly.
+func failureReason(transfer slskd.Transfer) string {
+	if transfer.Exception != nil && *transfer.Exception != "" {
+		return *transfer.Exception
+	}
+	return "unknown reason"
 }
 
 // failureSummary condenses failed transfers by reason: "3 of 12 transfers
@@ -992,19 +1194,38 @@ func coverageOf(files []slskd.File, titles []string) (float64, []slskd.File) {
 	return float64(len(matched)) / float64(len(titles)), matched
 }
 
+// pickAssignments is the outcome of source picking: the files to
+// download, which peer serves each, and each file's track index.
+type pickAssignments struct {
+	plan   []slskd.File
+	owners map[string]string
+	slots  map[string]int
+}
+
+// maxPoolLanes caps how many peers share one want: more lanes than
+// this buy little and lean hard on the network's goodwill.
+const maxPoolLanes = 4
+
+// offer is one peer's response, scored for source picking.
+type offer struct {
+	peer     string
+	score    float64
+	coverage float64
+	files    []slskd.File
+	flac     []slskd.File
+}
+
 // pickSource chooses the peer whose files best cover the release track
 // list (falling back to count heuristics when titles are unknown) and
-// returns only the files that plausibly belong to the release.
-func pickSource(search *slskd.Search, titles []string, trackCount int, excluded []string) (string, []slskd.File, error) {
+// returns only the files that plausibly belong to the release. When a
+// set of all-flac peers covers the whole album, the files are split
+// across them (up to maxPoolLanes) for parallel downloads; lossy
+// formats never pool, since mp3 bitrates vary wildly per source while
+// flac is flac.
+func pickSource(search *slskd.Search, titles []string, trackCount int, excluded []string) (pickAssignments, error) {
 	skip := map[string]bool{}
 	for _, peer := range excluded {
 		skip[peer] = true
-	}
-	type offer struct {
-		peer     string
-		score    float64
-		coverage float64
-		files    []slskd.File
 	}
 	var offers []offer
 	for _, response := range search.Responses {
@@ -1028,7 +1249,7 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 		} else if trackCount > 0 {
 			delta := len(files) - trackCount
 			if delta < 0 {
-				delta = -delta
+				delta = 0 - delta
 			}
 			choice.coverage = float64(len(files)) / float64(trackCount)
 			choice.score = 1.0 - float64(delta)/float64(trackCount)
@@ -1036,14 +1257,13 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 			choice.coverage = 1
 			choice.score = 0.5
 		}
-		lossless := 0
 		for _, file := range choice.files {
 			if strings.EqualFold(filepath.Ext(remoteName(file.Filename)), ".flac") {
-				lossless++
+				choice.flac = append(choice.flac, file)
 			}
 		}
 		if len(choice.files) > 0 {
-			choice.score += 0.2 * float64(lossless) / float64(len(choice.files))
+			choice.score += 0.2 * float64(len(choice.flac)) / float64(len(choice.files))
 		}
 		if response.HasFreeUploadSlot {
 			choice.score += 0.1
@@ -1054,7 +1274,7 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 		offers = append(offers, choice)
 	}
 	if len(offers) == 0 {
-		return "", nil, errors.New("no usable audio files in any response")
+		return pickAssignments{}, errors.New("no usable audio files in any response")
 	}
 	sort.Slice(offers, func(i, j int) bool {
 		if offers[i].score != offers[j].score {
@@ -1062,14 +1282,89 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 		}
 		return offers[i].peer < offers[j].peer
 	})
+
+	if len(titles) > 0 {
+		if plan, err := assembleFlacPool(offers, titles); err == nil {
+			return plan, nil
+		}
+	}
+
 	best := offers[0]
 	if len(titles) > 0 && best.coverage < minCoverage {
-		return "", nil, fmt.Errorf("best peer %s covers only %d%% of the %d release tracks; nothing downloaded", best.peer, int(best.coverage*100), len(titles))
+		return pickAssignments{}, fmt.Errorf("best peer %s covers only %d%% of the %d release tracks; nothing downloaded", best.peer, int(best.coverage*100), len(titles))
 	}
 	sort.Slice(best.files, func(i, j int) bool {
 		return remoteName(best.files[i].Filename) < remoteName(best.files[j].Filename)
 	})
-	return best.peer, best.files, nil
+	owners := map[string]string{}
+	slots := map[string]int{}
+	for _, file := range best.files {
+		owners[file.Filename] = best.peer
+		slots[file.Filename] = fileIndex(file, titles)
+	}
+	return pickAssignments{plan: best.files, owners: owners, slots: slots}, nil
+}
+
+// assembleFlacPool splits the album across all-flac sources when their
+// union covers every track: offers already carry each peer's flac
+// subset in score order, and lanes are admitted only while they add
+// coverage, up to maxPoolLanes. Any gap, or a pool too small to matter,
+// falls back to single-host picking.
+func assembleFlacPool(offers []offer, titles []string) (pickAssignments, error) {
+	if len(offers) < 2 {
+		return pickAssignments{}, errors.New("pool needs multiple peers")
+	}
+	covered := map[int]bool{}
+	plan := []slskd.File{}
+	owners := map[string]string{}
+	slots := map[string]int{}
+	used := map[string]bool{}
+	for _, offer := range offers {
+		if len(used) >= maxPoolLanes {
+			break
+		}
+		if used[offer.peer] {
+			continue
+		}
+		added := false
+		for _, file := range offer.flac {
+			idx := fileIndex(file, titles)
+			if idx < 0 || covered[idx] {
+				continue
+			}
+			covered[idx] = true
+			plan = append(plan, file)
+			owners[file.Filename] = offer.peer
+			slots[file.Filename] = idx
+			added = true
+		}
+		if added {
+			used[offer.peer] = true
+		}
+	}
+	if len(plan) < len(titles) {
+		return pickAssignments{}, fmt.Errorf("flac pool covers %d of %d tracks", len(plan), len(titles))
+	}
+	sort.Slice(plan, func(i, j int) bool {
+		return remoteName(plan[i].Filename) < remoteName(plan[j].Filename)
+	})
+	return pickAssignments{plan: plan, owners: owners, slots: slots}, nil
+}
+
+// fileIndex locates the track a soulseek file matches in the release
+// list, reusing the title matcher; -1 when nothing fits.
+func fileIndex(file slskd.File, titles []string) int {
+	guess := strings.ToLower(fileTitleGuess(file.Filename))
+	best, bestSim := -1, 0.0
+	for i, title := range titles {
+		if sim := match.Similarity(guess, strings.ToLower(title)); sim > bestSim {
+			best, bestSim = i, sim
+		}
+	}
+	if best < 0 || bestSim < 0.5 {
+		return -1
+	}
+	return best
 }
 
 // remoteParent and remoteName handle soulseek backslash paths portably.
