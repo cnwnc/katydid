@@ -639,9 +639,11 @@ func TestFlacPoolSplitsAcrossPeers(t *testing.T) {
 	}
 }
 
-func TestCompleteHostBeatsPool(t *testing.T) {
-	// one flac host with the whole album: no pooling even though two
-	// partilists could split it — one queue beats three for equal flac
+func TestCompleteHostJoinsPool(t *testing.T) {
+	// one flac host with the whole album plus two partilists: the pool
+	// splits across all three — speed comes from lanes, flac is flac.
+	// The complete host is capped at its slice so it cannot swallow
+	// every track and defeat the parallelism.
 	slskdFake := newFakeSlskd()
 	katydFake := autoTitlesResolver("vault", "orbit", "storm", "ground")
 	orchestrator, _ := harness(t, slskdFake, katydFake)
@@ -671,13 +673,21 @@ func TestCompleteHostBeatsPool(t *testing.T) {
 	if w.State != fetch.StateDownloading {
 		t.Fatalf("state %q err %q", w.State, w.Error)
 	}
-	for _, file := range w.Enqueued {
-		if w.Owners[file.Filename] != "full" {
-			t.Fatalf("complete host should own everything: %v", w.Owners)
-		}
+	// lanes = min(4 tracks/2 min share, maxLanes, peers) = 2, taken from
+	// the biggest flac contributors: full and halfa. Each track goes to
+	// the least-loaded feasible lane; halfa only holds two of the four
+	// tracks, so it ends up with one and full with three.
+	if w.Owners[`a\02 - orbit.flac`] != "halfa" {
+		t.Fatalf("halfa should carry orbit: %v", w.Owners)
 	}
-	if len(slskdFake.enqueued["halfa"]) != 0 || len(slskdFake.enqueued["halfb"]) != 0 {
-		t.Fatalf("partilists should not be enqueued: %v", slskdFake.enqueued)
+	if w.Owners[`f\01 - vault.flac`] != "full" || w.Owners[`f\03 - storm.flac`] != "full" {
+		t.Fatalf("full should carry its lanes: %v", w.Owners)
+	}
+	if len(slskdFake.enqueued["full"]) != 3 || len(slskdFake.enqueued["halfa"]) != 1 {
+		t.Fatalf("lane shares off: %v", slskdFake.enqueued)
+	}
+	if len(slskdFake.enqueued["halfb"]) != 0 {
+		t.Fatalf("only the top-2 flac peers should be lanes: %v", slskdFake.enqueued)
 	}
 }
 

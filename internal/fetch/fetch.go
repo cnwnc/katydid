@@ -1304,14 +1304,13 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 	})
 
 	if len(titles) > 0 {
-		// pooling is the gap-filler, not the default: a host carrying
-		// the whole album already beats any split (same flac, one
-		// queue, zero extra load), so the pool only assembles when the
-		// best single host is incomplete
-		if offers[0].coverage < 1 {
-			if plan, err := assembleFlacPool(offers, titles); err == nil {
-				return plan, nil
-			}
+		// pooling is the point when flac peers are plentiful: peer
+		// upload caps the download, not our link, so splitting the
+		// album across lanes moves more bytes per second than any
+		// single host could. A complete host joins the pool like
+		// everyone else and simply ends up carrying a full lane.
+		if plan, err := assembleFlacPool(offers, titles); err == nil {
+			return plan, nil
 		}
 	}
 
@@ -1349,35 +1348,63 @@ func assembleFlacPool(offers []offer, titles []string) (pickAssignments, error) 
 	plan := []slskd.File{}
 	owners := map[string]string{}
 	slots := map[string]int{}
-	used := map[string]bool{}
-	for _, offer := range byFlac {
-		if len(used) >= maxPoolLanes {
-			break
-		}
-		if used[offer.peer] {
-			continue
-		}
-		added := false
-		for _, file := range offer.flac {
-			idx := fileIndex(file, titles)
-			if idx < 0 || covered[idx] {
+	// lane count up front: capped by maxPoolLanes and by the min share
+	// (a lane poolable at ~minPoolShare tracks each). Lanes are the
+	// biggest flac contributors; each track goes to the least-loaded
+	// feasible lane, so a complete host carries one lane's worth like
+	// everyone else.
+	lanes := len(titles) / minPoolShare
+	if lanes > maxPoolLanes {
+		lanes = maxPoolLanes
+	}
+	if lanes > len(byFlac) {
+		lanes = len(byFlac)
+	}
+	if lanes < 2 {
+		return pickAssignments{}, errors.New("pool too small for a split")
+	}
+	byFlac = byFlac[:lanes]
+	claims := map[string]int{}
+	for idx := range titles {
+		pick := -1
+		for i, offer := range byFlac {
+			feasible := false
+			for _, file := range offer.flac {
+				if fileIndex(file, titles) == idx {
+					feasible = true
+					break
+				}
+			}
+			if !feasible {
 				continue
 			}
-			covered[idx] = true
-			plan = append(plan, file)
-			owners[file.Filename] = offer.peer
-			slots[file.Filename] = idx
-			added = true
+			if pick < 0 || claims[offer.peer] < claims[byFlac[pick].peer] {
+				pick = i
+			}
 		}
-		if added {
-			used[offer.peer] = true
+		if pick < 0 {
+			return pickAssignments{}, fmt.Errorf("no flac peer covers track %d", idx+1)
+		}
+		for _, file := range byFlac[pick].flac {
+			if fileIndex(file, titles) == idx {
+				covered[idx] = true
+				plan = append(plan, file)
+				owners[file.Filename] = byFlac[pick].peer
+				slots[file.Filename] = idx
+				claims[byFlac[pick].peer]++
+				break
+			}
 		}
 	}
 	if len(plan) < len(titles) {
 		return pickAssignments{}, fmt.Errorf("flac pool covers %d of %d tracks", len(plan), len(titles))
 	}
-	if len(plan) < minPoolShare*len(used) {
-		return pickAssignments{}, fmt.Errorf("flac pool is too fragmented: %d tracks over %d peers", len(plan), len(used))
+	lanesUsed := map[string]bool{}
+	for _, peer := range owners {
+		lanesUsed[peer] = true
+	}
+	if len(lanesUsed) < 2 {
+		return pickAssignments{}, fmt.Errorf("flac pool collapsed to %d lane", len(lanesUsed))
 	}
 	sort.Slice(plan, func(i, j int) bool {
 		return remoteName(plan[i].Filename) < remoteName(plan[j].Filename)
