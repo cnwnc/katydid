@@ -81,9 +81,13 @@ type Want struct {
 	Downloaded    int               `json:"downloaded,omitempty"`
 	DecisionToken string            `json:"decision_token,omitempty"`
 	ExcludedPeers []string          `json:"excluded_peers,omitempty"`
-	AlbumID       string            `json:"album_id,omitempty"`
-	Attempts      map[string]int    `json:"attempts,omitempty"`
-	Notes         []string          `json:"notes,omitempty"`
+	// BindSince anchors the retry window for files that finished
+	// transferring but never showed up on disk; UpdatedAt refreshes
+	// every tick and cannot serve as the anchor.
+	BindSince time.Time      `json:"bind_since,omitempty"`
+	AlbumID   string         `json:"album_id,omitempty"`
+	Attempts  map[string]int `json:"attempts,omitempty"`
+	Notes     []string       `json:"notes,omitempty"`
 }
 
 // Katyd is the slice of the katyd client the orchestrator needs.
@@ -112,6 +116,11 @@ type Config struct {
 	// BindRetry bounds how long a want waits for downloaded files to
 	// turn up on disk before failing; zero means staleAfter.
 	BindRetry time.Duration
+	// ExpireNeedsDecision and ExpireTerminal bound how long parked
+	// decisions and finished wants (and their downloads) linger; zero
+	// means the package defaults.
+	ExpireNeedsDecision time.Duration
+	ExpireTerminal      time.Duration
 }
 
 // Store persists wants as a single atomically written JSON document; the
@@ -347,7 +356,45 @@ func (o *Orchestrator) Tick(ctx context.Context) {
 		case StateNeedsRelease, StateImported, StateSkipped, StateFailed:
 		}
 	}
+	o.reap()
 }
+
+// reap times out parked decisions and deletes finished wants together
+// with their downloads: on a tmpfs downloads tree the files are ram,
+// so nothing may linger.
+func (o *Orchestrator) reap() {
+	decision, terminal := o.cfg.ExpireNeedsDecision, o.cfg.ExpireTerminal
+	if decision == 0 {
+		decision = defaultExpireNeedsDecision
+	}
+	if terminal == 0 {
+		terminal = defaultExpireTerminal
+	}
+	for _, want := range o.store.snapshot() {
+		switch want.State {
+		case StateNeedsPick:
+			if time.Since(want.UpdatedAt) <= decision {
+				continue
+			}
+			o.withWant(want, func(w *Want) error {
+				w.State = StateFailed
+				w.Error = fmt.Sprintf("needs a decision, expired after %s (token %s); re-add with /addalbum", decision, want.DecisionToken)
+				o.purgeDownloads(w)
+				return nil
+			})
+		case StateImported, StateSkipped, StateFailed:
+			if time.Since(want.UpdatedAt) <= terminal {
+				continue
+			}
+			_ = o.Remove(want.ID)
+		}
+	}
+}
+
+const (
+	defaultExpireNeedsDecision = 24 * time.Hour
+	defaultExpireTerminal      = 2 * time.Hour
+)
 
 func (o *Orchestrator) withWant(want Want, mutate func(*Want) error) {
 	o.mu.Lock()
@@ -356,7 +403,7 @@ func (o *Orchestrator) withWant(want Want, mutate func(*Want) error) {
 		want.State = StateFailed
 		want.Error = err.Error()
 		o.stopSearch(&want)
-		dropStaging(&want)
+		o.purgeDownloads(&want)
 	}
 	o.store.put(want)
 	if err := o.store.Save(); err != nil {
@@ -572,12 +619,14 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			if time.Since(w.UpdatedAt) > staleAfter {
 				return fmt.Errorf("only %d of %d transfers visible after %s", len(byName), len(enqueued), staleAfter)
 			}
-			return nil
 		}
 		succeeded := 0
 		failed := []slskd.Transfer{}
 		for name := range enqueued {
-			transfer := byName[name]
+			transfer, visible := byName[name]
+			if !visible {
+				continue
+			}
 			switch {
 			case slskd.TransferSucceeded(transfer.State):
 				succeeded++
@@ -612,14 +661,12 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			w.Notes = append(w.Notes, "re-enqueued "+summary)
 			return nil
 		}
-		if succeeded < len(enqueued) {
-			return nil
-		}
+		// slots bind as their transfers finish, so one slow file never
+		// blocks the rest; nothing imports until every slot is bound
 		if err := o.bindPaths(w); err != nil {
 			return err
 		}
 		if w.StagingDir == "" {
-			// slots not fully bound yet; the next tick retries
 			return nil
 		}
 		req := importer.Request{
@@ -648,13 +695,15 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 }
 
 // switchPeer drops the current peer and goes back to source picking,
-// reusing the finished search when slskd still has it.
+// reusing the finished search when slskd still has it. The dropped
+// peer's files are junk (copies from a fresh peer differ) and go with it.
 func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) error {
 	dropped := w.Peer
 	w.ExcludedPeers = append(w.ExcludedPeers, dropped)
 	w.Notes = append(w.Notes, fmt.Sprintf("dropped peer %s: %s", dropped, reason))
+	o.purgeDownloads(w)
 	w.Peer, w.RemoteDir, w.Enqueued, w.Attempts, w.Downloaded = "", "", nil, nil, 0
-	w.Paths = nil
+	w.BindSince = time.Time{}
 	if len(w.ExcludedPeers) >= maxPeers {
 		return fmt.Errorf("gave up after %d peers, last %s: %s", len(w.ExcludedPeers), dropped, reason)
 	}
@@ -714,6 +763,14 @@ func (o *Orchestrator) reconcileDecision(ctx context.Context, want Want) {
 // missing files retry until the bind window closes, since slskd can
 // mark a transfer complete a beat before the file is settled.
 func (o *Orchestrator) bindPaths(w *Want) error {
+	// bindings made before a reboot (tmpfs wipes the tree) dangle;
+	// drop them so the slots re-bind or fail by name
+	for name, path := range w.Paths {
+		if _, err := os.Stat(path); err != nil {
+			delete(w.Paths, name)
+			w.Notes = append(w.Notes, "downloaded file vanished: "+filepath.Base(path)+"; rebinding")
+		}
+	}
 	missing := []string{}
 	ambiguous := []string{}
 	found := map[string]string{}
@@ -754,22 +811,33 @@ func (o *Orchestrator) bindPaths(w *Want) error {
 	if len(ambiguous) > 0 {
 		return fmt.Errorf("duplicate downloads, delete the stale copy: %s", strings.Join(ambiguous, "; "))
 	}
+	// found slots bind immediately and permanently, even while others
+	// are still in flight
+	if len(found) > 0 {
+		if w.Paths == nil {
+			w.Paths = map[string]string{}
+		}
+		for name, path := range found {
+			w.Paths[name] = path
+		}
+	}
 	if len(missing) > 0 {
 		retry := o.cfg.BindRetry
 		if retry == 0 {
 			retry = staleAfter
 		}
-		if time.Since(w.UpdatedAt) > retry {
+		// the window anchors on the first missing observation: UpdatedAt
+		// refreshes every poll and would never let it close
+		if w.BindSince.IsZero() {
+			w.BindSince = time.Now().UTC()
+			return nil
+		}
+		if time.Since(w.BindSince) > retry {
 			return fmt.Errorf("%d of %d downloaded files never turned up on disk after %s: %s", len(missing), len(w.Enqueued), retry, strings.Join(missing, ", "))
 		}
 		return nil
 	}
-	if w.Paths == nil {
-		w.Paths = map[string]string{}
-	}
-	for name, path := range found {
-		w.Paths[name] = path
-	}
+	w.BindSince = time.Time{}
 	if len(w.Paths) < len(w.Enqueued) {
 		return nil
 	}
@@ -814,6 +882,46 @@ func dropStaging(w *Want) {
 		os.RemoveAll(w.StagingDir)
 		w.StagingDir = ""
 	}
+}
+
+// purgeDownloads deletes the files a finished want downloaded, any
+// download directories it emptied, and its staging dir. Files still
+// referenced by an active want survive, and only paths this want bound
+// are ever touched — never a directory wholesale, because slskd users
+// may keep unrelated downloads there.
+func (o *Orchestrator) purgeDownloads(w *Want) {
+	shared := map[string]bool{}
+	for _, other := range o.store.snapshot() {
+		if other.ID == w.ID {
+			continue
+		}
+		switch other.State {
+		case StateImported, StateSkipped, StateFailed:
+		default:
+			for _, path := range other.Paths {
+				shared[path] = true
+			}
+		}
+	}
+	dirs := map[string]bool{}
+	for _, path := range w.Paths {
+		if shared[path] {
+			continue
+		}
+		if err := os.Remove(path); err == nil {
+			dirs[filepath.Dir(path)] = true
+		}
+	}
+	for dir := range dirs {
+		for dir != o.cfg.DownloadsDir && strings.HasPrefix(dir, o.cfg.DownloadsDir) {
+			if os.Remove(dir) != nil {
+				break
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	dropStaging(w)
+	w.Paths = nil
 }
 
 // pickSource chooses the peer directory that best matches the release.
@@ -976,7 +1084,7 @@ func (o *Orchestrator) absorbResult(want *Want, result importer.Result) error {
 		want.State = StateImported
 		want.AlbumID = result.AlbumID
 		want.DecisionToken = ""
-		dropStaging(want)
+		o.purgeDownloads(want)
 	case "needs_decision":
 		if result.Decision == nil {
 			return errors.New("katyd returned needs_decision without a token")
@@ -986,7 +1094,7 @@ func (o *Orchestrator) absorbResult(want *Want, result importer.Result) error {
 		want.DecisionToken = result.Decision.Token
 	case "skipped":
 		want.State = StateSkipped
-		dropStaging(want)
+		o.purgeDownloads(want)
 	default:
 		return fmt.Errorf("unexpected import status %q", result.Status)
 	}

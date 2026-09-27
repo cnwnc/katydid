@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"doppel.moe/katydid/internal/api"
 	"doppel.moe/katydid/internal/fetch"
@@ -66,6 +67,7 @@ type fakeKatyd struct {
 	resolveErr      error
 	resolves        int
 	imported        []importer.Request
+	importDirFiles  [][]string
 	importResult    importer.Result
 	decided         []string
 	decideResult    importer.Result
@@ -86,6 +88,13 @@ func (f *fakeKatyd) Albums(_ library.Query) (api.AlbumsResponse, error) {
 
 func (f *fakeKatyd) Import(req importer.Request) (importer.Result, error) {
 	f.imported = append(f.imported, req)
+	if entries, err := os.ReadDir(req.Dir); err == nil {
+		names := []string{}
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		f.importDirFiles = append(f.importDirFiles, names)
+	}
 	return f.importResult, nil
 }
 
@@ -94,19 +103,22 @@ func (f *fakeKatyd) Decide(token string, _ importer.DecideInput) (importer.Resul
 	return f.decideResult, nil
 }
 
-func harness(t *testing.T, slskdFake *fakeSlskd, katydFake *fakeKatyd) (*fetch.Orchestrator, string) {
+func harness(t *testing.T, slskdFake *fakeSlskd, katydFake *fakeKatyd, tune ...func(*fetch.Config)) (*fetch.Orchestrator, string) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := fetch.OpenStore(filepath.Join(dir, "state.json"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	orchestrator := fetch.New(store, fetch.Config{
+	cfg := fetch.Config{
 		Slskd:        slskdFake,
 		Katyd:        katydFake,
 		DownloadsDir: filepath.Join(dir, "downloads"),
-	})
-	return orchestrator, dir
+	}
+	for _, f := range tune {
+		f(&cfg)
+	}
+	return fetch.New(store, cfg), dir
 }
 
 func find(t *testing.T, orchestrator *fetch.Orchestrator, id string) fetch.Want {
@@ -232,6 +244,223 @@ func TestLastFMWantSkipsResolveAndImportsMarked(t *testing.T) {
 	req := katydFake.imported[0]
 	if req.Source != "lastfm" || req.Artist != "The Brown" || req.Album != "MelloW" {
 		t.Fatalf("import request should carry lastfm identity: %+v", req)
+	}
+}
+
+func TestMissingFileRetriesThenFailsNamed(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, root := harness(t, slskdFake, katydFake, func(c *fetch.Config) { c.BindRetry = time.Nanosecond })
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+		{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900},
+	}}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	os.WriteFile(filepath.Join(localDir, "01 - vault.flac"), make([]byte, 500), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900, State: "Completed, Succeeded"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateDownloading || w.Error != "" {
+		t.Fatalf("missing file should wait, not fail: state %q err %q", w.State, w.Error)
+	}
+	if w.Paths[`dir\SAETIA\01 - vault.flac`] == "" {
+		t.Fatalf("found file should be bound: %+v", w.Paths)
+	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateFailed || !strings.Contains(w.Error, "02 - orbit.flac") {
+		t.Fatalf("stale missing file should fail naming it: state %q err %q", w.State, w.Error)
+	}
+}
+
+func TestDuplicateCopyFailsNamingBoth(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+	}}}
+	orchestrator.Tick(context.Background())
+	for _, dir := range []string{"SAETIA", "SAETIA.1"} {
+		os.MkdirAll(filepath.Join(root, "downloads", dir), 0o755)
+		os.WriteFile(filepath.Join(root, "downloads", dir, "01 - vault.flac"), make([]byte, 500), 0o644)
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateFailed || !strings.Contains(w.Error, "found at") || !strings.Contains(w.Error, "delete the stale copy") {
+		t.Fatalf("duplicate copies should fail loud: state %q err %q", w.State, w.Error)
+	}
+}
+
+func TestVanishedBindingRebindsAfterReboot(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+		{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900},
+	}}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	file := filepath.Join(localDir, "01 - vault.flac")
+	os.WriteFile(file, make([]byte, 500), 0o644)
+	// track 2 is still transferring: track 1 can bind but nothing imports
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 900, State: "Downloading"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.Paths[`dir\SAETIA\01 - vault.flac`] == "" {
+		t.Fatalf("file should be bound: %+v", w.Paths)
+	}
+	// tmpfs wiped the tree (reboot): the binding dangles and must drop,
+	// and nothing may import from dangling links
+	os.Remove(file)
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.Paths != nil && w.Paths[`dir\SAETIA\01 - vault.flac`] != "" {
+		t.Fatalf("dangling binding should be dropped: %+v", w.Paths)
+	}
+	if w.StagingDir != "" {
+		t.Fatalf("staging must not be built from dangling bindings: %q", w.StagingDir)
+	}
+	if w.State != fetch.StateDownloading {
+		t.Fatalf("want should wait for the rebind: state %q err %q", w.State, w.Error)
+	}
+	// the file lands again and the slot rebinds
+	os.WriteFile(file, make([]byte, 500), 0o644)
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.Paths[`dir\SAETIA\01 - vault.flac`] == "" {
+		t.Fatalf("file should rebind: %+v", w.Paths)
+	}
+}
+
+func TestTerminalWantsReapWithTheirFiles(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+	}}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	file := filepath.Join(localDir, "01 - vault.flac")
+	os.WriteFile(file, make([]byte, 500), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
+	}}}}}
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "x"}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateImported {
+		t.Fatalf("state %q err %q", w.State, w.Error)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("imported want should purge its download: %v", err)
+	}
+	// reopen with an expired window, as after a config change plus restart
+	store, err := fetch.OpenStore(filepath.Join(root, "state.json"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	expired := fetch.New(store, fetch.Config{
+		Slskd:          slskdFake,
+		Katyd:          katydFake,
+		DownloadsDir:   filepath.Join(root, "downloads"),
+		ExpireTerminal: time.Nanosecond,
+	})
+	expired.Tick(context.Background())
+	if _, ok := expired.Want(want.ID); ok {
+		t.Fatalf("expired imported want should be reaped")
+	}
+}
+
+func TestNeedsDecisionExpiresAfterADay(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 500},
+	}}}
+	orchestrator.Tick(context.Background())
+	localDir := filepath.Join(root, "downloads", "SAETIA")
+	os.MkdirAll(localDir, 0o755)
+	file := filepath.Join(localDir, "01 - vault.flac")
+	os.WriteFile(file, make([]byte, 500), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 500, State: "Completed, Succeeded"},
+	}}}}}
+	katydFake.importResult = importer.Result{Status: "needs_decision", Decision: &importer.Decision{Token: "tok-1"}}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateNeedsPick {
+		t.Fatalf("state %q, want needs_decision", w.State)
+	}
+	// still inside the window: files must survive the parked decision
+	orchestrator.Tick(context.Background())
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("parked decision needs its files: %v", err)
+	}
+	if _, ok := orchestrator.Want(want.ID); !ok {
+		t.Fatalf("parked want should survive inside the window")
+	}
+	// reopen the store with an expired window, as after a config change
+	// plus restart; the decision is gone and the downloads with it
+	store, err := fetch.OpenStore(filepath.Join(root, "state.json"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	expired := fetch.New(store, fetch.Config{
+		Slskd:               slskdFake,
+		Katyd:               katydFake,
+		DownloadsDir:        filepath.Join(root, "downloads"),
+		ExpireNeedsDecision: time.Nanosecond,
+		ExpireTerminal:      time.Hour,
+	})
+	expired.Tick(context.Background())
+	w = find(t, expired, want.ID)
+	if w.State != fetch.StateFailed || !strings.Contains(w.Error, "expired") {
+		t.Fatalf("expired decision should fail the want: state %q err %q", w.State, w.Error)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("expired decision should purge its downloads: %v", err)
 	}
 }
 
@@ -380,6 +609,22 @@ func TestDownloadToImportHappyPath(t *testing.T) {
 	}
 	if len(katydFake.imported) != 1 || katydFake.imported[0].By != "fetchd" {
 		t.Fatalf("imported requests = %+v", katydFake.imported)
+	}
+	if katydFake.imported[0].MBID != "r1" {
+		t.Fatalf("import should pin the resolved release: %+v", katydFake.imported[0])
+	}
+	// the handoff is a staging dir of symlinks, never the downloads tree
+	if got := katydFake.importDirFiles[0]; len(got) != 1 || got[0] != "01 - vault.flac" {
+		t.Fatalf("staged files = %v", got)
+	}
+	if katydFake.imported[0].Dir == filepath.Join(root, "downloads", "SAETIA") {
+		t.Fatalf("import should never see the downloads dir: %q", katydFake.imported[0].Dir)
+	}
+	if want.StagingDir != "" {
+		t.Fatalf("staging dir should be cleaned after import: %q", want.StagingDir)
+	}
+	if _, err := os.Stat(filepath.Join(root, "downloads", "SAETIA", "01 - vault.flac")); !os.IsNotExist(err) {
+		t.Fatalf("downloaded file should be purged after import: %v", err)
 	}
 	if err := orchestrator.Remove(want.ID); err != nil {
 		t.Fatalf("remove terminal want: %v", err)

@@ -847,6 +847,36 @@ func TestPairFilesTrustsNumbersAcrossScripts(t *testing.T) {
 	}
 }
 
+func TestImportFollowsSymlinkedFiles(t *testing.T) {
+	startMB(t, autoFixture())
+	root := t.TempDir()
+	real := twoTestFiles(t)
+	// fetchd hands katyd staging dirs of symlinks; the import must
+	// treat them as ordinary files
+	link := t.TempDir()
+	for _, base := range []string{"01 - First Song.flac", "02 - Second Song.flac"} {
+		if err := os.Symlink(filepath.Join(real, base), filepath.Join(link, base)); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+	}
+	manager := newManager(t, root)
+
+	result, err := manager.Import(context.Background(), Request{Dir: link})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Status != statusImported {
+		t.Fatalf("status: %+v", result)
+	}
+	sc, err := sidecar.Load(filepath.Join(root, result.AlbumID))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if len(sc.Tracks) != 2 {
+		t.Errorf("published %d tracks, want 2", len(sc.Tracks))
+	}
+}
+
 func TestImportNotesTitleChanges(t *testing.T) {
 	startMB(t, mbFixture{
 		search: []mb.SearchRelease{mbtest.SyntheticSearch("rel-5", "rg-5", "Test Album", "Test Artist", "2001-10-01", 2)},
