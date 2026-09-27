@@ -182,11 +182,6 @@ func (c *Client) fetch(ctx context.Context, params url.Values) ([]byte, error) {
 	return body, nil
 }
 
-func atoi(s string) int {
-	n, _ := strconv.Atoi(s)
-	return n
-}
-
 // flexInt takes a json number or a numeric string: last.fm pages are
 // user-scraped and mix both for the same fields (rank, duration).
 type flexInt int
