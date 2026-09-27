@@ -577,8 +577,25 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			if err != nil {
 				return err
 			}
-			if len(pick.plan) == 0 {
-				return fmt.Errorf("no source left for %d track(s) after peers failed", len(w.Enqueued)-len(w.Paths))
+			// a dead slot with no candidate left can never recover:
+			// fail loud instead of dropping the track quietly
+			dead, planned := map[int]bool{}, map[int]bool{}
+			for _, file := range w.Enqueued {
+				if _, isDead := w.Excluded[file.Filename]; isDead {
+					dead[w.Slots[file.Filename]] = true
+				}
+			}
+			for _, idx := range pick.slots {
+				planned[idx] = true
+			}
+			missing := 0
+			for idx := range dead {
+				if !planned[idx] {
+					missing++
+				}
+			}
+			if missing > 0 {
+				return fmt.Errorf("no source left for %d track(s) after peers failed", missing)
 			}
 		}
 		// grouped per owner: a pool enqueues one batch per peer
@@ -586,10 +603,30 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 		for _, file := range pick.plan {
 			batches[pick.owners[file.Filename]] = append(batches[pick.owners[file.Filename]], file)
 		}
+		applied := []slskd.File{}
 		for peer, files := range batches {
 			if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
-				return fmt.Errorf("enqueue %d files from %s: %w", len(files), peer, err)
+				// slskd cannot reach the peer; that is not a dead
+				// want: the peer is out of future picks and whatever
+				// it carried re-sources next round
+				w.ExcludedPeers = append(w.ExcludedPeers, peer)
+				w.Notes = append(w.Notes, fmt.Sprintf("enqueue to %s failed, peer dropped: %v", peer, err))
+				continue
 			}
+			applied = append(applied, files...)
+		}
+		if len(applied) < len(pick.plan) {
+			if len(w.Enqueued) == 0 {
+				// a fresh pick with a batch lost is void: re-pick
+				// next tick without the dropped peers; anything the
+				// surviving batches already enqueued re-picks as a
+				// harmless duplicate
+				return nil
+			}
+			// a failover round keeps its dead files flagged and
+			// re-sources them next tick from the remaining peers
+			w.State = StateSearching
+			return nil
 		}
 		if len(w.Enqueued) == 0 {
 			w.Owners = pick.owners
@@ -849,12 +886,24 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 					}
 					batches[owner] = append(batches[owner], file)
 				}
+				// an enqueue error means slskd cannot reach the peer
+				// right now, not a dead want: the transfers stay
+				// failed, so the next tick retries, and the attempts
+				// bound then fails the file over to another peer
+				retried, broken := []string{}, []string{}
 				for peer, files := range batches {
 					if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
-						return fmt.Errorf("re-enqueue %d failed files: %w", len(files), err)
+						broken = append(broken, fmt.Sprintf("%s: %v", peer, err))
+						continue
 					}
+					retried = append(retried, peer)
 				}
-				w.Notes = append(w.Notes, "re-enqueued "+strings.Join(perFile, "; "))
+				if len(retried) > 0 {
+					w.Notes = append(w.Notes, "re-enqueued "+strings.Join(perFile, "; "))
+				}
+				if len(broken) > 0 {
+					w.Notes = append(w.Notes, "re-enqueue failed, will retry: "+strings.Join(broken, "; "))
+				}
 			}
 			if len(w.Excluded) >= maxPeers {
 				// every slot has burned through its peers

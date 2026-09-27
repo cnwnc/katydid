@@ -24,6 +24,7 @@ type fakeSlskd struct {
 	downloads   []slskd.UserResponse
 	createErr   error
 	enqueuedSeq []string
+	failEnqueue map[string]error
 }
 
 func newFakeSlskd() *fakeSlskd {
@@ -53,6 +54,9 @@ func (f *fakeSlskd) DeleteSearch(_ context.Context, id string) error {
 }
 
 func (f *fakeSlskd) EnqueueDownloads(_ context.Context, username string, files []slskd.File) error {
+	if err := f.failEnqueue[username]; err != nil {
+		return err
+	}
 	f.enqueued[username] = append(f.enqueued[username], files...)
 	f.enqueuedSeq = append(f.enqueuedSeq, username)
 	return nil
@@ -1274,6 +1278,153 @@ func TestRepeatedFileFailureSwitchesPeer(t *testing.T) {
 	got := find(t, orchestrator, want.ID)
 	if got.State != fetch.StateDownloading || got.Owners[`x\saetia\02 orbit.flac`] != "other" {
 		t.Fatalf("orbit should be re-sourced from other: state %q owners %v", got.State, got.Owners)
+	}
+}
+
+func TestReenqueueErrorRetriesInsteadOfFailing(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"))
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer",
+		Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	slskdFake.failEnqueue = map[string]error{
+		"peer": errors.New(`POST /api/v0/transfers/downloads/peer: status 500: "Failed to connect to user peer"`),
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Errored",
+			Exception: strPtr("Too many files")},
+	}}}}}
+
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Error != "" {
+		t.Fatalf("re-enqueue error must not fail the want: state %q err %q", want.State, want.Error)
+	}
+	if !strings.Contains(strings.Join(want.Notes, "\n"), "will retry") {
+		t.Fatalf("the failure should be noted for retry: %v", want.Notes)
+	}
+
+	for i := 0; i < 3; i++ {
+		orchestrator.Tick(context.Background())
+	}
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching {
+		t.Fatalf("the attempts bound should fail the file over to searching: state %q err %q", want.State, want.Error)
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateFailed || !strings.Contains(want.Error, "no source left for 1 track(s)") {
+		t.Fatalf("an unsourced slot with no peers left should fail loud: state %q err %q", want.State, want.Error)
+	}
+}
+
+func TestInitialEnqueueErrorDropsPeerAndResources(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	slskdFake.failEnqueue = map[string]error{"peer": errors.New(`status 500: "Failed to connect to user peer"`)}
+	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"))
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "other", Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 10},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || want.Error != "" {
+		t.Fatalf("enqueue error must not fail the want: state %q err %q", want.State, want.Error)
+	}
+	if len(want.ExcludedPeers) != 1 || want.ExcludedPeers[0] != "peer" {
+		t.Fatalf("the unreachable peer should be dropped: %v", want.ExcludedPeers)
+	}
+	if len(want.Enqueued) != 0 {
+		t.Fatalf("a void pick should leave nothing enqueued: %v", want.Enqueued)
+	}
+
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "other" {
+		t.Fatalf("should re-source from other: state %q peer %q err %q", want.State, want.Peer, want.Error)
+	}
+	if len(slskdFake.enqueued["other"]) != 2 {
+		t.Fatalf("other should carry both files: %v", slskdFake.enqueued["other"])
+	}
+}
+
+func TestFailoverEnqueueErrorKeepsSearching(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"))
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "other", Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 10},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+		{Username: "third", Files: []slskd.File{
+			{Filename: `y\saetia\01 vault.flac`, Size: 11},
+			{Filename: `y\saetia\02 orbit.flac`, Size: 21},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Errored",
+			Exception: strPtr("Too many files")},
+	}}}}}
+	for i := 0; i < 4; i++ {
+		orchestrator.Tick(context.Background())
+	}
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching {
+		t.Fatalf("orbit should be searching for a new peer: state %q err %q", want.State, want.Error)
+	}
+
+	slskdFake.failEnqueue = map[string]error{"other": errors.New(`status 500: "Failed to connect to user other"`)}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || want.Error != "" {
+		t.Fatalf("a replacement enqueue error must not fail the want: state %q err %q", want.State, want.Error)
+	}
+	if len(want.ExcludedPeers) != 1 || want.ExcludedPeers[0] != "other" {
+		t.Fatalf("the unreachable replacement peer should be dropped: %v", want.ExcludedPeers)
+	}
+	if want.Excluded[`dir\SAETIA\02 - orbit.flac`] != "peer" {
+		t.Fatalf("the dead file should stay flagged for the next round: %v", want.Excluded)
+	}
+
+	slskdFake.failEnqueue = nil
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Owners[`y\saetia\02 orbit.flac`] != "third" {
+		t.Fatalf("third should take the slot: state %q owners %v err %q", want.State, want.Owners, want.Error)
 	}
 }
 
