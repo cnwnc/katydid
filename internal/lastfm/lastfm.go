@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"doppel.moe/katydid/internal/match"
@@ -79,15 +80,15 @@ func (c *Client) GetInfo(ctx context.Context, artist, album string) (Album, erro
 		Artist:    out.Album.Artist,
 		MBID:      out.Album.MBID,
 		URL:       out.Album.URL,
-		Listeners: atoi(out.Album.Listeners),
+		Listeners: int(out.Album.Listeners),
 	}
 	// stub pages carry no tracks key; that is fine, not an error
 	if out.Album.Tracks != nil {
 		for _, t := range out.Album.Tracks.Track {
 			found.Tracks = append(found.Tracks, Track{
 				Name:     t.Name,
-				Duration: atoi(t.Duration),
-				Rank:     atoi(t.Attr.Rank),
+				Duration: int(t.Duration),
+				Rank:     int(t.Attr.Rank),
 			})
 		}
 	}
@@ -186,6 +187,25 @@ func atoi(s string) int {
 	return n
 }
 
+// flexInt takes a json number or a numeric string: last.fm pages are
+// user-scraped and mix both for the same fields (rank, duration).
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(raw []byte) error {
+	s := strings.Trim(string(raw), `"`)
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		*f = 0
+		return nil
+	}
+	*f = flexInt(n)
+	return nil
+}
+
 // apiError is last.fm's in-band error envelope; a zero code means success.
 type apiError struct {
 	Code    int    `json:"error"`
@@ -193,12 +213,12 @@ type apiError struct {
 }
 
 type apiTrackAttr struct {
-	Rank string `json:"rank"`
+	Rank flexInt `json:"rank"`
 }
 
 type apiTrack struct {
 	Name     string       `json:"name"`
-	Duration string       `json:"duration"`
+	Duration flexInt      `json:"duration"`
 	Attr     apiTrackAttr `json:"@attr"`
 }
 
@@ -207,7 +227,7 @@ type apiAlbum struct {
 	Artist    string `json:"artist"`
 	MBID      string `json:"mbid"`
 	URL       string `json:"url"`
-	Listeners string `json:"listeners"`
+	Listeners flexInt `json:"listeners"`
 	Tracks    *struct {
 		Track []apiTrack `json:"track"`
 	} `json:"tracks"`

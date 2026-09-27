@@ -87,6 +87,44 @@ func TestGetInfoFull(t *testing.T) {
 	}
 }
 
+func TestGetInfoTolerantFieldTypes(t *testing.T) {
+	// the real The Brown - MelloW page: rank arrives as a json NUMBER,
+	// durations arrive as null and numbers as often as strings
+	const body = `{"album":{` +
+		`"name":"MelloW",` +
+		`"artist":"The Brown",` +
+		`"mbid":"",` +
+		`"listeners":12,` +
+		`"tracks":{"track":[` +
+		`{"name":"Modern play","duration":null,"@attr":{"rank":1}},` +
+		`{"name":"森二潜ム","duration":198,"@attr":{"rank":2}},` +
+		`{"name":"Dear K.C","duration":"221","@attr":{"rank":"3"}},` +
+		`{"name":"Low and low","duration":"null","@attr":{"rank":4}}` +
+		`]}}}`
+	c, _ := serve(t, http.StatusOK, body)
+	got, err := c.GetInfo(context.Background(), "The Brown", "Mellow")
+	if err != nil {
+		t.Fatalf("GetInfo: %v", err)
+	}
+	want := []Track{
+		{Name: "Modern play", Duration: 0, Rank: 1},
+		{Name: "森二潜ム", Duration: 198, Rank: 2},
+		{Name: "Dear K.C", Duration: 221, Rank: 3},
+		{Name: "Low and low", Duration: 0, Rank: 4},
+	}
+	if len(got.Tracks) != len(want) {
+		t.Fatalf("tracks = %d, want %d", len(got.Tracks), len(want))
+	}
+	for i, w := range want {
+		if got.Tracks[i] != w {
+			t.Errorf("track %d = %+v, want %+v", i, got.Tracks[i], w)
+		}
+	}
+	if got.Listeners != 12 {
+		t.Errorf("listeners = %d, want 12", got.Listeners)
+	}
+}
+
 func TestGetInfoStub(t *testing.T) {
 	const body = `{"album":{"name":"Mellow","artist":"The Brown",` +
 		`"mbid":"","url":"https://www.last.fm/music/The+Brown/Mellow","listeners":"7"}}`
