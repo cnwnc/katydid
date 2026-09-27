@@ -1304,8 +1304,14 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 	})
 
 	if len(titles) > 0 {
-		if plan, err := assembleFlacPool(offers, titles); err == nil {
-			return plan, nil
+		// pooling is the gap-filler, not the default: a host carrying
+		// the whole album already beats any split (same flac, one
+		// queue, zero extra load), so the pool only assembles when the
+		// best single host is incomplete
+		if offers[0].coverage < 1 {
+			if plan, err := assembleFlacPool(offers, titles); err == nil {
+				return plan, nil
+			}
 		}
 	}
 
@@ -1325,11 +1331,11 @@ func pickSource(search *slskd.Search, titles []string, trackCount int, excluded 
 	return pickAssignments{plan: best.files, owners: owners, slots: slots}, nil
 }
 
-// assembleFlacPool splits the album across all-flac sources when their
-// union covers every track: offers are taken biggest-first so lanes
-// fill with large contributors, capped at maxPoolLanes. Any gap, or a
-// pool whose lanes would average fewer than minPoolShare tracks,
-// falls back to single-host picking.
+// assembleFlacPool splits the album across all-flac sources when no
+// single host covers it and their union does: offers are taken
+// biggest-flac-first so lanes fill with large contributors, capped at
+// maxPoolLanes. Any gap, or a pool whose lanes would average fewer
+// than minPoolShare tracks, falls back to single-host picking.
 func assembleFlacPool(offers []offer, titles []string) (pickAssignments, error) {
 	if len(offers) < 2 {
 		return pickAssignments{}, errors.New("pool needs multiple peers")

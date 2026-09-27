@@ -564,8 +564,9 @@ func TestFlacPoolSplitsAcrossPeers(t *testing.T) {
 	w := find(t, orchestrator, want.ID)
 	search := slskdFake.searches[w.SearchID]
 	search.IsComplete = true
-	// a 4-track album, two flac peers with two tracks each (meets the
-	// 2-tracks-per-lane minimum), lossy full-album host present
+	// a 4-track album, no single flac host complete; two partilists
+	// whose union covers it (meets the 2-tracks-per-lane minimum),
+	// lossy full-album host present but outclassed per policy
 	katydFake = autoTitlesResolver("vault", "orbit", "storm", "ground")
 	orchestrator, root = harness(t, slskdFake, katydFake)
 	want, _ = orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
@@ -584,9 +585,7 @@ func TestFlacPoolSplitsAcrossPeers(t *testing.T) {
 		}},
 		{Username: "lossy", Files: []slskd.File{
 			{Filename: `c\saetia\01 - vault.mp3`, Size: 5},
-			{Filename: `c\saetia\02 - orbit.mp3`, Size: 6},
 			{Filename: `c\saetia\03 - storm.mp3`, Size: 7},
-			{Filename: `c\saetia\04 - ground.mp3`, Size: 8},
 		}},
 	}
 	orchestrator.Tick(context.Background())
@@ -637,6 +636,48 @@ func TestFlacPoolSplitsAcrossPeers(t *testing.T) {
 	}
 	if got := katydFake.importDirFiles[0]; len(got) != 4 {
 		t.Fatalf("staged %v, want all four pool files", got)
+	}
+}
+
+func TestCompleteHostBeatsPool(t *testing.T) {
+	// one flac host with the whole album: no pooling even though two
+	// partilists could split it — one queue beats three for equal flac
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit", "storm", "ground")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	w := find(t, orchestrator, want.ID)
+	search := slskdFake.searches[w.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "full", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `f\01 - vault.flac`, Size: 9},
+			{Filename: `f\02 - orbit.flac`, Size: 19},
+			{Filename: `f\03 - storm.flac`, Size: 29},
+			{Filename: `f\04 - ground.flac`, Size: 39},
+		}},
+		{Username: "halfa", Files: []slskd.File{
+			{Filename: `a\01 - vault.flac`, Size: 9},
+			{Filename: `a\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "halfb", Files: []slskd.File{
+			{Filename: `b\03 - storm.flac`, Size: 29},
+			{Filename: `b\04 - ground.flac`, Size: 39},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	w = find(t, orchestrator, want.ID)
+	if w.State != fetch.StateDownloading {
+		t.Fatalf("state %q err %q", w.State, w.Error)
+	}
+	for _, file := range w.Enqueued {
+		if w.Owners[file.Filename] != "full" {
+			t.Fatalf("complete host should own everything: %v", w.Owners)
+		}
+	}
+	if len(slskdFake.enqueued["halfa"]) != 0 || len(slskdFake.enqueued["halfb"]) != 0 {
+		t.Fatalf("partilists should not be enqueued: %v", slskdFake.enqueued)
 	}
 }
 
