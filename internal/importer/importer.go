@@ -17,7 +17,6 @@ import (
 
 	taglib "go.senan.xyz/taglib"
 
-	"doppel.moe/katydid/internal/lastfm"
 	"doppel.moe/katydid/internal/library"
 	"doppel.moe/katydid/internal/match"
 	"doppel.moe/katydid/internal/mb"
@@ -38,15 +37,10 @@ const (
 )
 
 type Request struct {
-	Dir    string `json:"dir"`
-	Artist string `json:"artist,omitempty"`
-	Album  string `json:"album,omitempty"`
-	Year   int    `json:"year,omitempty"`
-	// Source marks where the metadata identity comes from: "" is
-	// musicbrainz, "lastfm" imports by last.fm names alone with loud
-	// unvetted marking everywhere.
-	Source  string `json:"source,omitempty"`
-	URL     string `json:"url,omitempty"`
+	Dir     string `json:"dir"`
+	Artist  string `json:"artist,omitempty"`
+	Album   string `json:"album,omitempty"`
+	Year    int    `json:"year,omitempty"`
 	MBID    string `json:"mbid,omitempty"`
 	Replace bool   `json:"replace,omitempty"`
 	By      string `json:"by,omitempty"`
@@ -119,9 +113,8 @@ type pending struct {
 }
 
 type Manager struct {
-	index  *library.Index
-	mb     *mb.Client
-	lastfm *lastfm.Client
+	index *library.Index
+	mb    *mb.Client
 
 	mu        sync.Mutex
 	decisions map[string]*pending
@@ -150,8 +143,8 @@ func (m *Manager) record(request string, result Result) {
 	m.results[request] = result
 }
 
-func New(index *library.Index, client *mb.Client, lastfm *lastfm.Client) *Manager {
-	return &Manager{index: index, mb: client, lastfm: lastfm, decisions: map[string]*pending{}}
+func New(index *library.Index, client *mb.Client) *Manager {
+	return &Manager{index: index, mb: client, decisions: map[string]*pending{}}
 }
 
 func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
@@ -166,16 +159,6 @@ func (m *Manager) Import(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case req.Source == sourceLastFM:
-		if req.MBID != "" {
-			return nil, errors.New("last.fm import takes no musicbrainz id")
-		}
-		return m.importLastFM(ctx, req, files, evidence)
-	case req.Source != "":
-		return nil, fmt.Errorf("unknown import source %q", req.Source)
-	}
-
 	if req.MBID != "" {
 		return m.importByMBID(ctx, req, files, evidence)
 	}
@@ -671,11 +654,6 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile, 
 		notes = append(notes, fmt.Sprintf("release has no date, used file year %d", year))
 	}
 	albumTitle := release.Title
-	// a last.fm-sourced album gets a loud directory marker so nobody
-	// mistakes it for a musicbrainz-vetted import
-	if req.Source == sourceLastFM {
-		albumTitle += " [last.fm]"
-	}
 
 	dir, err := policy.PlanDir(pol, albumArtist, albumTitle, year)
 	if err != nil {
@@ -754,20 +732,13 @@ func (m *Manager) publish(req Request, release *mb.Release, files []sourceFile, 
 		},
 		Tracks: tracks,
 	}
-	if req.Source == sourceLastFM {
-		// identity came from last.fm, so the musicbrainz fields stay
-		// empty and the sidecar names its source explicitly
-		sc.Source = sourceLastFM
-		sc.LastFM.URL = req.URL
-	} else {
-		sc.MusicBrainz.ReleaseID = release.ID
-		if release.ReleaseGroup != nil {
-			sc.MusicBrainz.ReleaseGroupID = release.ReleaseGroup.ID
-		}
-		sc.MusicBrainz.Date = release.Date
-		sc.Label = firstLabel(release)
-		sc.CatalogNumber = firstCatalogNumber(release)
+	sc.MusicBrainz.ReleaseID = release.ID
+	if release.ReleaseGroup != nil {
+		sc.MusicBrainz.ReleaseGroupID = release.ReleaseGroup.ID
 	}
+	sc.MusicBrainz.Date = release.Date
+	sc.Label = firstLabel(release)
+	sc.CatalogNumber = firstCatalogNumber(release)
 	sc.AlbumArtists = distinctOr(mb.CreditList(release.ArtistCredit), []string{albumArtist})
 	sc.AlbumArtistSort = mb.SortName(release.ArtistCredit)
 	sc.OriginalDate = release.OriginalDate()
@@ -986,11 +957,6 @@ func payloadForTrack(sc *sidecar.Album, track *sidecar.Track, pol policy.Policy,
 		raw["CATALOGNUMBER"] = []string{sc.CatalogNumber}
 	}
 	payload := policy.Apply(pol, raw)
-	// the last.fm provenance comment rides outside the policy
-	// keep-list so no policy can scrub the unvetted marker
-	if sc.Source == sourceLastFM {
-		payload["COMMENT"] = []string{lastfmComment}
-	}
 	return payload
 }
 

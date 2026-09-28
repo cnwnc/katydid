@@ -8,12 +8,14 @@ import (
 
 	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
+	"doppel.moe/katydid/internal/llm"
 	"doppel.moe/katydid/internal/match"
 )
 
 type Server struct {
 	Index  *library.Index
 	Import *importer.Manager
+	LLM    *llm.Client
 }
 
 type StatusResponse struct {
@@ -48,6 +50,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /decisions", s.decisions)
 	mux.HandleFunc("GET /import/result", s.importResult)
 	mux.HandleFunc("GET /resolve", s.resolve)
+	mux.HandleFunc("POST /llm/pick", s.llmPick)
+	mux.HandleFunc("POST /llm/alias", s.llmAlias)
 	mux.HandleFunc("POST /retag", s.retag)
 	return mux
 }

@@ -7,7 +7,6 @@ const (
 	customExpand = "expand"
 	customPick   = "pick"
 	customAdd    = "add:"
-	customLastFM = "lastfmadd"
 )
 
 type actionKind int
@@ -18,7 +17,6 @@ const (
 	actionExpand
 	actionAdd
 	actionPick
-	actionLastFMAdd
 )
 
 type action struct {
@@ -38,8 +36,6 @@ func parseAction(customID string, values []string) action {
 			return action{kind: actionPick, value: values[0]}
 		}
 		return action{kind: actionPick}
-	case customLastFM:
-		return action{kind: actionLastFMAdd}
 	}
 	if rest, ok := strings.CutPrefix(customID, customAdd); ok && rest != "" {
 		return action{kind: actionAdd, value: rest}

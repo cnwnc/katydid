@@ -30,9 +30,11 @@ usage:
   kat decide <token> <N|Y|done|skip>, or <token> remap <file> <track>
   kat retag [-all | <album-id>] [-policy=]
   kat decisions
+  kat fetchfrom [-dry-run] <list.txt>
 
 environment:
-  KATYDID_SOCKET  unix socket path (default /run/katyd/katyd.sock)`
+  KATYDID_SOCKET    unix socket path (default /run/katyd/katyd.sock)
+  KATYFETCHD_SOCKET fetchd socket path (default /run/katy-fetchd/fetchd.sock)`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -61,6 +63,8 @@ func main() {
 		err = runRetag(client, os.Args[2:])
 	case "decisions":
 		err = runDecisions(client, os.Args[2:])
+	case "fetchfrom":
+		err = runFetchFrom(client, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "kat: unknown command %q\n\n%s\n", os.Args[1], usage)
 		os.Exit(2)

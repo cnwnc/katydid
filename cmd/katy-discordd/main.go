@@ -12,7 +12,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"doppel.moe/katydid/internal/discord"
-	"doppel.moe/katydid/internal/lastfm"
 	"doppel.moe/katydid/internal/navidrome"
 )
 
@@ -74,14 +73,7 @@ func run() error {
 		navdStatus = base
 	}
 
-	var lf discord.LastFM
-	lastFMStatus := "disabled"
-	if lastFMToken := os.Getenv("LASTFM_TOKEN"); lastFMToken != "" {
-		lf = lastfm.New(lastFMToken)
-		lastFMStatus = "enabled"
-	}
-
-	bot := discord.NewBot(discord.NewKatyd(*katydSocket), discord.NewFetchd(*fetchdSocket), navd, lf,
+	bot := discord.NewBot(discord.NewKatyd(*katydSocket), discord.NewFetchd(*fetchdSocket), navd,
 		discord.Config{AppID: *appID, GuildID: *guild})
 	session.AddHandler(bot.OnReady)
 	session.AddHandler(bot.OnInteraction)
@@ -90,8 +82,8 @@ func run() error {
 		return fmt.Errorf("open gateway: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "katy-discordd: app %s, commands %s, katyd %s, fetchd %s, navidrome %s, lastfm %s\n",
-		*appID, discord.ScopeLabel(*guild), *katydSocket, *fetchdSocket, navdStatus, lastFMStatus)
+	fmt.Fprintf(os.Stderr, "katy-discordd: app %s, commands %s, katyd %s, fetchd %s, navidrome %s\n",
+		*appID, discord.ScopeLabel(*guild), *katydSocket, *fetchdSocket, navdStatus)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

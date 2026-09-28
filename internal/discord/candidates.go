@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
-
-	"doppel.moe/katydid/internal/lastfm"
 )
 
 const (
@@ -21,7 +19,6 @@ const (
 	addButtonLabel    = "Add this"
 	cancelButtonLabel = "Cancel"
 	expandButtonLabel = "Show more"
-	lastFMAddLabel    = "Add with last.fm metadata"
 )
 
 // menuOptions builds up to limit select options, skipping candidates without an id.
@@ -84,16 +81,6 @@ func matchText(c Candidate, auto bool) string {
 		text += "\n" + autoLine
 	}
 	return text
-}
-
-// lastFMText renders the unvetted last.fm import prompt.
-func lastFMText(spec addSpec, al lastfm.Album) string {
-	return strings.Join([]string{
-		"No musicbrainz match — last.fm has this album:",
-		al.Artist + " - " + al.Name,
-		fmt.Sprintf("%d tracks, no musicbrainz id", len(al.Tracks)),
-		"Importing tags it as unvetted: [last.fm] folder suffix and a comment on every file.",
-	}, "\n")
 }
 
 // choicesText renders the multi-candidate prompt. parseChoicesSpec reads it back.

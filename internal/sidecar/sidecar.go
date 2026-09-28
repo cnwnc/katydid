@@ -36,12 +36,6 @@ type MusicBrainz struct {
 	Date           string `yaml:"date,omitempty"`
 }
 
-// LastFM holds the last.fm provenance for albums imported without a
-// musicbrainz entry.
-type LastFM struct {
-	URL string `yaml:"url,omitempty"`
-}
-
 type Origin struct {
 	Path string `yaml:"path,omitempty"`
 }
@@ -73,8 +67,6 @@ type Album struct {
 	Label           string      `yaml:"label,omitempty"`
 	CatalogNumber   string      `yaml:"catalognumber,omitempty"`
 	MusicBrainz     MusicBrainz `yaml:"musicbrainz"`
-	Source          string      `yaml:"source,omitempty"`
-	LastFM          LastFM      `yaml:"lastfm,omitempty"`
 	Provenance      Provenance  `yaml:"provenance"`
 	TagState        *TagState   `yaml:"tags,omitempty"`
 	Tracks          []Track     `yaml:"tracks"`

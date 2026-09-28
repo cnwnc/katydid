@@ -194,3 +194,98 @@ func (c *Client) ResolveGroup(group string) (api.ResolveResponse, error) {
 	var out api.ResolveResponse
 	return out, c.get("/resolve?group="+url.QueryEscape(group), &out)
 }
+
+// WantSpec queues a fetch on the fetchd socket; Group or MBID pin the
+// identity so the fetcher never re-guesses it.
+type WantSpec struct {
+	Artist        string `json:"artist"`
+	Album         string `json:"album"`
+	Year          int    `json:"year,omitempty"`
+	MBID          string `json:"mbid,omitempty"`
+	Group         string `json:"group,omitempty"`
+	ReleaseArtist string `json:"release_artist,omitempty"`
+	ReleaseTitle  string `json:"release_title,omitempty"`
+}
+
+// WantReply is the slice of a fetchd want the CLI prints.
+type WantReply struct {
+	ID            string `json:"id"`
+	Artist        string `json:"artist"`
+	Album         string `json:"album"`
+	ReleaseArtist string `json:"release_artist"`
+	ReleaseTitle  string `json:"release_title"`
+	State         string `json:"state"`
+	Error         string `json:"error"`
+}
+
+type wantEnvelope struct {
+	Want WantReply `json:"want"`
+}
+
+// AddWant posts to a fetchd socket; dial cli.Dial(fetchd socket) for
+// it, the katyd socket has no wants.
+func (c *Client) AddWant(spec WantSpec) (WantReply, error) {
+	var out wantEnvelope
+	if err := c.postJSON("/wants", spec, &out); err != nil {
+		return WantReply{}, err
+	}
+	return out.Want, nil
+}
+
+// Wants lists the fetchd queue, for skipping lines that are already
+// queued.
+func (c *Client) Wants() ([]WantReply, error) {
+	var out struct {
+		Wants []WantReply `json:"wants"`
+	}
+	if err := c.get("/wants", &out); err != nil {
+		return nil, err
+	}
+	return out.Wants, nil
+}
+
+// LLMPickOption is one MusicBrainz candidate offered to the model.
+type LLMPickOption struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Artist string `json:"artist"`
+	Date   string `json:"date,omitempty"`
+	Tracks int    `json:"tracks,omitempty"`
+	Type   string `json:"type,omitempty"`
+}
+
+type LLMPickReply struct {
+	Pick string `json:"pick"`
+	Note string `json:"note,omitempty"`
+}
+
+// LLMPick asks katyd to have the configured model choose among real
+// MusicBrainz candidates; an empty Pick means none matched.
+func (c *Client) LLMPick(request string, options []LLMPickOption) (LLMPickReply, error) {
+	var out LLMPickReply
+	body := struct {
+		Request string          `json:"request"`
+		Options []LLMPickOption `json:"options"`
+	}{Request: request, Options: options}
+	return out, c.postJSON("/llm/pick", body, &out)
+}
+
+type LLMAliasVariant struct {
+	Artist string `json:"artist"`
+	Album  string `json:"album"`
+}
+
+type LLMAliasReply struct {
+	Variants []LLMAliasVariant `json:"variants"`
+}
+
+// LLMAlias asks katyd for respellings of an unresolvable artist/album
+// pair; the variants are re-searched, never trusted directly.
+func (c *Client) LLMAlias(artist, album string) (LLMAliasReply, error) {
+	var out LLMAliasReply
+	body := struct {
+		Artist string `json:"artist"`
+		Album  string `json:"album"`
+	}{Artist: artist, Album: album}
+	return out, c.postJSON("/llm/alias", body, &out)
+}

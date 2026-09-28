@@ -10,16 +10,13 @@ type Server struct {
 }
 
 type addRequest struct {
-	Artist        string   `json:"artist"`
-	Album         string   `json:"album"`
-	Year          int      `json:"year"`
-	MBID          string   `json:"mbid"`
-	Group         string   `json:"group"`
-	ReleaseArtist string   `json:"release_artist"`
-	ReleaseTitle  string   `json:"release_title"`
-	Source        string   `json:"source"`
-	SourceURL     string   `json:"source_url"`
-	TrackTitles   []string `json:"track_titles"`
+	Artist        string `json:"artist"`
+	Album         string `json:"album"`
+	Year          int    `json:"year"`
+	MBID          string `json:"mbid"`
+	Group         string `json:"group"`
+	ReleaseArtist string `json:"release_artist"`
+	ReleaseTitle  string `json:"release_title"`
 }
 
 type decideRequest struct {
@@ -95,9 +92,6 @@ func (s *Server) add(w http.ResponseWriter, r *http.Request) {
 		GroupID:       req.Group,
 		ReleaseArtist: req.ReleaseArtist,
 		ReleaseTitle:  req.ReleaseTitle,
-		Source:        req.Source,
-		SourceURL:     req.SourceURL,
-		TrackTitles:   req.TrackTitles,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

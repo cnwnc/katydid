@@ -2,8 +2,6 @@ package discord
 
 import (
 	"github.com/bwmarrin/discordgo"
-
-	"doppel.moe/katydid/internal/lastfm"
 )
 
 type addSpec struct {
@@ -15,8 +13,6 @@ type addSpec struct {
 	// Candidates holds the resolve results behind this prompt so a pick
 	// can seed the want with musicbrainz names before fetchd resolves.
 	Candidates []Candidate
-	// LastFM carries the last.fm album behind an unvetted import prompt.
-	LastFM *lastfm.Album
 }
 
 func parseAddSpec(data discordgo.ApplicationCommandInteractionData) addSpec {

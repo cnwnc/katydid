@@ -15,6 +15,7 @@ import (
 	"doppel.moe/katydid/internal/api"
 	"doppel.moe/katydid/internal/importer"
 	"doppel.moe/katydid/internal/library"
+	"doppel.moe/katydid/internal/llm"
 	"doppel.moe/katydid/internal/mb"
 )
 
@@ -56,13 +57,17 @@ func run() error {
 		status.Version, status.Library, status.Albums, status.Pending, status.ScanDuration)
 
 	manager := newImporter(index)
+	llmClient := llm.New(os.Getenv("KATYD_LLM_BASE_URL"), os.Getenv("KATYD_LLM_API_KEY"), os.Getenv("KATYD_LLM_MODEL"))
+	if llmClient.Enabled() {
+		fmt.Fprintf(os.Stderr, "katyd: llm candidate picking enabled via %s (%s)\n", os.Getenv("KATYD_LLM_BASE_URL"), os.Getenv("KATYD_LLM_MODEL"))
+	}
 	listener, err := listen(*socket)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(*socket)
 
-	server := &api.Server{Index: index, Import: manager}
+	server := &api.Server{Index: index, Import: manager, LLM: llmClient}
 	httpServer := &http.Server{Handler: server.Handler()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -91,7 +96,7 @@ func newImporter(index *library.Index) *importer.Manager {
 		}
 	}
 	noCache := os.Getenv("KATYDID_MB_NOCACHE") != ""
-	return importer.New(index, mb.New(mbBase, cacheDir, noCache), nil)
+	return importer.New(index, mb.New(mbBase, cacheDir, noCache))
 }
 
 func listen(socket string) (net.Listener, error) {
