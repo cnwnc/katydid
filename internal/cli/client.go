@@ -136,7 +136,8 @@ func (c *Client) doWithBody(method, path string, body []byte, out any) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	// any 2xx is success: fetchd answers 201 on POST /wants
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody api.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errBody); err == nil && errBody.Error != "" {
 			return fmt.Errorf("%s %s: %s", method, path, errBody.Error)

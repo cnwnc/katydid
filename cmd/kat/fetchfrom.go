@@ -49,15 +49,19 @@ func runFetchFrom(katyd *cli.Client, args []string) error {
 		return fmt.Errorf("list wants: %w", err)
 	}
 	wanted := map[string]string{}
+	byRelease := map[string]string{}
 	for _, want := range queued {
 		wanted[wantKey(want.Artist, want.Album)] = want.ID
+		if want.ReleaseArtist != "" && want.ReleaseTitle != "" {
+			byRelease[wantKey(want.ReleaseArtist, want.ReleaseTitle)] = want.ID
+		}
 	}
 
 	lines := parseAlbumList(string(raw))
 	if len(lines) == 0 {
 		return errors.New("list has no entries")
 	}
-	batch := &batchFetcher{katyd: katyd, fetchd: fetchd, wanted: wanted, dryRun: *dryRun}
+	batch := &batchFetcher{katyd: katyd, fetchd: fetchd, wanted: wanted, byRelease: byRelease, dryRun: *dryRun}
 	for _, line := range lines {
 		batch.line(line)
 	}
@@ -77,15 +81,24 @@ func wantKey(artist, album string) string {
 	return strings.ToLower(artist) + "\x00" + strings.ToLower(album)
 }
 
+// changed reports whether a retried spelling differs from the typed
+// one; an identity respelling does not deserve a "via" note.
+func changed(a, b string) bool {
+	return !strings.EqualFold(a, b)
+}
+
 type batchFetcher struct {
-	katyd    *cli.Client
-	fetchd   *cli.Client
-	wanted   map[string]string
-	dryRun   bool
-	queued   int
-	skipped  int
-	rejected int
-	rejects  []string
+	katyd  *cli.Client
+	fetchd *cli.Client
+	wanted map[string]string
+	// byRelease catches re-runs whose typed names drifted (years
+	// stripped, respellings) but resolve to the same album
+	byRelease map[string]string
+	dryRun    bool
+	queued    int
+	skipped   int
+	rejected  int
+	rejects   []string
 }
 
 // line resolves and queues one list entry; a bad entry is rejected and
@@ -105,6 +118,11 @@ func (b *batchFetcher) line(line listLine) {
 		b.reject(line, err.Error())
 		return
 	}
+	if _, ok := b.byRelease[wantKey(names.Artist, names.Title)]; ok {
+		b.skipped++
+		fmt.Printf("%s %s\n", ansi.Yellow("skip"), ansi.Dim(line.Raw+" already queued as "+names.Artist+" - "+names.Title))
+		return
+	}
 	fmt.Printf("%s %s -> %s (%s)\n", ansi.Green("queue"), line.Raw,
 		names.Artist+" - "+names.Title, ansi.Dim(decision))
 	b.queued++
@@ -114,6 +132,7 @@ func (b *batchFetcher) line(line listLine) {
 	spec := cli.WantSpec{
 		Artist:        line.Artist,
 		Album:         line.Album,
+		Year:          line.Year,
 		Group:         names.GroupID,
 		ReleaseArtist: names.Artist,
 		ReleaseTitle:  names.Title,
@@ -123,6 +142,7 @@ func (b *batchFetcher) line(line listLine) {
 		b.reject(line, "queue want: "+err.Error())
 		return
 	}
+	b.byRelease[wantKey(names.Artist, names.Title)] = ""
 }
 
 func (b *batchFetcher) reject(line listLine, reason string) {
@@ -159,8 +179,8 @@ func (b *batchFetcher) resolveLine(artist, album string) (names, string, error) 
 			if err != nil {
 				return names{}, "", err
 			}
-			if aliased {
-				how = "alias " + how
+			if changed(current.Artist+"\x00"+current.Title, original.Artist+"\x00"+original.Title) {
+				how = "via \"" + current.Artist + " - " + current.Title + "\" " + how
 			}
 			return picked, how, nil
 		}
@@ -194,7 +214,10 @@ func (b *batchFetcher) resolveLine(artist, album string) (names, string, error) 
 			if err != nil {
 				return names{}, "", err
 			}
-			return picked, "alias " + variant.Artist + " - " + variant.Album + " " + how, nil
+			if changed(variant.Artist+"\x00"+variant.Album, original.Artist+"\x00"+original.Title) {
+				how = "respelled \"" + variant.Artist + " - " + variant.Album + "\" " + how
+			}
+			return picked, how, nil
 		}
 		return names{}, "", fmt.Errorf("no candidates for %s - %s after %d respelling(s)", original.Artist, original.Title, len(aliases.Variants))
 	}
