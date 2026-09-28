@@ -127,6 +127,9 @@ type Config struct {
 	// means the package defaults.
 	ExpireNeedsDecision time.Duration
 	ExpireTerminal      time.Duration
+	// BlacklistAfter is how many drops put a peer on the in-memory
+	// blacklist, skipping it in every future pick; zero means 2.
+	BlacklistAfter int
 }
 
 // Store persists wants as a single atomically written JSON document; the
@@ -208,10 +211,60 @@ type Orchestrator struct {
 	store *Store
 	cfg   Config
 	mu    sync.Mutex
+	// strikes counts whole-peer drops per username. In memory only: a
+	// restart gives everyone a clean slate. Guarded by mu.
+	strikes map[string]int
 }
 
+// defaultBlacklistAfter is the drop count after which a peer is skipped
+// in all future picks.
+const defaultBlacklistAfter = 2
+
 func New(store *Store, cfg Config) *Orchestrator {
-	return &Orchestrator{store: store, cfg: cfg}
+	return &Orchestrator{store: store, cfg: cfg, strikes: map[string]int{}}
+}
+
+// blacklistAfter reports the configured drop count for blacklisting.
+func (o *Orchestrator) blacklistAfter() int {
+	if o.cfg.BlacklistAfter > 0 {
+		return o.cfg.BlacklistAfter
+	}
+	return defaultBlacklistAfter
+}
+
+// strike records a whole-peer drop; once a peer accumulates the
+// blacklist threshold it is skipped in every future pick across all
+// wants. Callers run under mu.
+func (o *Orchestrator) strike(peer string) {
+	if peer == "" {
+		return
+	}
+	o.strikes[peer]++
+	if o.strikes[peer] == o.blacklistAfter() {
+		fmt.Fprintf(os.Stderr, "fetchd: peer %s blacklisted after %d drops\n", peer, o.strikes[peer])
+	}
+}
+
+// forgive clears a peer's strikes: a successful transfer outweighs a
+// bad night. Blocked peers never deliver, so they stay listed.
+func (o *Orchestrator) forgive(peer string) {
+	if peer == "" {
+		return
+	}
+	delete(o.strikes, peer)
+}
+
+// blacklisted lists currently blacklisted usernames. Callers run under
+// mu.
+func (o *Orchestrator) blacklisted() []string {
+	out := []string{}
+	for peer, count := range o.strikes {
+		if count >= o.blacklistAfter() {
+			out = append(out, peer)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Spec queues what to fetch: the typed specifier as entered, plus the
@@ -561,7 +614,16 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 		}
 		var pick pickAssignments
 		if len(w.Enqueued) == 0 {
-			fresh, err := pickSource(search, w.TrackTitles, w.TrackCount, w.ExcludedPeers)
+			black := o.blacklisted()
+			fresh, err := pickSource(search, w.TrackTitles, w.TrackCount, append(append([]string{}, w.ExcludedPeers...), black...))
+			if err != nil && len(black) > 0 {
+				// starvation: a blacklisted peer beats a want that
+				// can never be fulfilled; retry unfiltered
+				fresh, err = pickSource(search, w.TrackTitles, w.TrackCount, nil)
+				if err == nil {
+					w.Notes = append(w.Notes, "blacklist yielded: only blacklisted peer(s) had files")
+				}
+			}
 			if err != nil {
 				if len(w.ExcludedPeers) > 0 {
 					return fmt.Errorf("no other peer after dropping %s: %w", strings.Join(w.ExcludedPeers, ", "), err)
@@ -572,26 +634,42 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 		} else {
 			// failover round: only the slots whose (file, peer) pair died
 			// need re-sourcing; everything bound or healthy is untouched
+			black := o.blacklisted()
 			var err error
-			pick, err = failoverPlan(w, search)
+			pick, err = failoverPlan(w, search, black)
 			if err != nil {
 				return err
 			}
 			// a dead slot with no candidate left can never recover:
 			// fail loud instead of dropping the track quietly
-			dead, planned := map[int]bool{}, map[int]bool{}
-			for _, file := range w.Enqueued {
-				if _, isDead := w.Excluded[file.Filename]; isDead {
-					dead[w.Slots[file.Filename]] = true
+			unplanned := func(p pickAssignments) int {
+				dead, planned := map[int]bool{}, map[int]bool{}
+				for _, file := range w.Enqueued {
+					if _, isDead := w.Excluded[file.Filename]; isDead {
+						dead[w.Slots[file.Filename]] = true
+					}
 				}
+				for _, idx := range p.slots {
+					planned[idx] = true
+				}
+				missing := 0
+				for idx := range dead {
+					if !planned[idx] {
+						missing++
+					}
+				}
+				return missing
 			}
-			for _, idx := range pick.slots {
-				planned[idx] = true
-			}
-			missing := 0
-			for idx := range dead {
-				if !planned[idx] {
-					missing++
+			missing := unplanned(pick)
+			if missing > 0 && len(black) > 0 {
+				// starvation: a blacklisted peer beats a dead track
+				pick, err = failoverPlan(w, search, nil)
+				if err != nil {
+					return err
+				}
+				if unplanned(pick) == 0 {
+					missing = 0
+					w.Notes = append(w.Notes, "blacklist yielded: only blacklisted peer(s) had files")
 				}
 			}
 			if missing > 0 {
@@ -610,6 +688,7 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 				// want: the peer is out of future picks and whatever
 				// it carried re-sources next round
 				w.ExcludedPeers = append(w.ExcludedPeers, peer)
+				o.strike(peer)
 				w.Notes = append(w.Notes, fmt.Sprintf("enqueue to %s failed, peer dropped: %v", peer, err))
 				continue
 			}
@@ -678,7 +757,7 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 // search: for each enqueued file marked dead in Excluded, find another
 // peer offering the same track index, preferring peers already in the
 // pool and refusing lossy substitutes for a flac slot.
-func failoverPlan(w *Want, search *slskd.Search) (pickAssignments, error) {
+func failoverPlan(w *Want, search *slskd.Search, blacklisted []string) (pickAssignments, error) {
 	type candidate struct {
 		peer string
 		file slskd.File
@@ -686,7 +765,7 @@ func failoverPlan(w *Want, search *slskd.Search) (pickAssignments, error) {
 	perIndex := map[int][]candidate{}
 	for _, response := range search.Responses {
 		excludedPeer := false
-		for _, peer := range w.ExcludedPeers {
+		for _, peer := range append(append([]string{}, w.ExcludedPeers...), blacklisted...) {
 			if peer == response.Username {
 				excludedPeer = true
 				break
@@ -816,6 +895,8 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			switch {
 			case slskd.TransferSucceeded(transfer.State):
 				delete(w.Attempts, file.Filename)
+				// a delivered file outweighs past drops
+				o.forgive(owner)
 			case slskd.TransferFailed(transfer.State):
 				// a file already bound from disk is done, whatever the
 				// transfer list still claims about it
@@ -958,6 +1039,7 @@ func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) e
 	}
 	dropped := w.Peer
 	w.ExcludedPeers = append(w.ExcludedPeers, dropped)
+	o.strike(dropped)
 	w.Notes = append(w.Notes, fmt.Sprintf("dropped peer %s: %s", dropped, reason))
 	o.purgeDownloads(w)
 	w.Peer, w.RemoteDir, w.Enqueued, w.Attempts, w.Downloaded = "", "", nil, nil, 0

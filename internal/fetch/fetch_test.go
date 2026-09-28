@@ -1565,6 +1565,134 @@ func TestSplitMultiDiscDirectoriesPoolTogether(t *testing.T) {
 	}
 }
 
+var blackPeerResponses = []slskd.Response{
+	{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+		{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+	}},
+	{Username: "other", Files: []slskd.File{
+		{Filename: `x\saetia\01 vault.flac`, Size: 10},
+		{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+	}},
+}
+
+func blackRefusePeer(slskdFake *fakeSlskd) {
+	slskdFake.downloads = []slskd.UserResponse{failedTransfers("peer", map[string]int64{
+		`dir\SAETIA\01 - vault.flac`: 9,
+		`dir\SAETIA\02 - orbit.flac`: 19,
+	}, "File not shared.")}
+}
+
+func TestPeerBlacklistedAfterTwoDrops(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	spec := fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""}
+
+	blackRefusePeer(slskdFake)
+	orchestrator.Tick(context.Background())
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "other" {
+		t.Fatalf("first drop: state %q peer %q err %q", want.State, want.Peer, want.Error)
+	}
+
+	queued, _ := orchestrator.Add(spec)
+	orchestrator.Tick(context.Background())
+	current := find(t, orchestrator, queued.ID)
+	search := slskdFake.searches[current.SearchID]
+	search.IsComplete = true
+	search.Responses = blackPeerResponses
+	orchestrator.Tick(context.Background())
+	current = find(t, orchestrator, queued.ID)
+	if current.Peer != "peer" {
+		t.Fatalf("one strike should not blacklist yet: peer %q", current.Peer)
+	}
+	blackRefusePeer(slskdFake)
+	orchestrator.Tick(context.Background())
+	orchestrator.Tick(context.Background())
+	current = find(t, orchestrator, queued.ID)
+	if current.State != fetch.StateDownloading || current.Peer != "other" {
+		t.Fatalf("second drop: state %q peer %q err %q", current.State, current.Peer, current.Error)
+	}
+
+	queued2, _ := orchestrator.Add(spec)
+	orchestrator.Tick(context.Background())
+	current2 := find(t, orchestrator, queued2.ID)
+	search2 := slskdFake.searches[current2.SearchID]
+	search2.IsComplete = true
+	search2.Responses = blackPeerResponses
+	orchestrator.Tick(context.Background())
+	current2 = find(t, orchestrator, queued2.ID)
+	if current2.Peer != "other" {
+		t.Fatalf("blacklisted peer must be skipped despite the free slot: peer %q", current2.Peer)
+	}
+	if got := len(slskdFake.enqueued["peer"]); got != 4 {
+		t.Fatalf("blacklisted peer must not be enqueued again: %d files", got)
+	}
+}
+
+func TestBlacklistYieldsAndForgivesOnDelivery(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	spec := fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""}
+
+	blackRefusePeer(slskdFake)
+	orchestrator.Tick(context.Background())
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "other" {
+		t.Fatalf("first drop: state %q peer %q err %q", want.State, want.Peer, want.Error)
+	}
+
+	// second want whose search offers ONLY the struck peer: still
+	// allowed (one strike), and the refusal blacklists it
+	queued, _ := orchestrator.Add(spec)
+	orchestrator.Tick(context.Background())
+	current := find(t, orchestrator, queued.ID)
+	search := slskdFake.searches[current.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{blackPeerResponses[0]}
+	orchestrator.Tick(context.Background())
+	current = find(t, orchestrator, queued.ID)
+	if current.Peer != "peer" {
+		t.Fatalf("one strike should not blacklist yet: peer %q", current.Peer)
+	}
+	blackRefusePeer(slskdFake)
+	orchestrator.Tick(context.Background())
+	orchestrator.Tick(context.Background())
+	current = find(t, orchestrator, queued.ID)
+	if current.Peer != "peer" || current.State != fetch.StateDownloading {
+		t.Fatalf("starvation should yield to the blacklisted peer: state %q peer %q err %q", current.State, current.Peer, current.Error)
+	}
+	if !strings.Contains(strings.Join(current.Notes, "\n"), "blacklist yielded") {
+		t.Fatalf("the yield should be noted: %v", current.Notes)
+	}
+
+	// a delivered file forgives the peer
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Errored",
+			Exception: strPtr("Too many files")},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	current = find(t, orchestrator, queued.ID)
+	if current.State != fetch.StateDownloading {
+		t.Fatalf("delivery should forgive and keep downloading: state %q err %q", current.State, current.Error)
+	}
+
+	queued2, _ := orchestrator.Add(spec)
+	orchestrator.Tick(context.Background())
+	current2 := find(t, orchestrator, queued2.ID)
+	search2 := slskdFake.searches[current2.SearchID]
+	search2.IsComplete = true
+	search2.Responses = blackPeerResponses
+	orchestrator.Tick(context.Background())
+	current2 = find(t, orchestrator, queued2.ID)
+	if current2.Peer != "peer" {
+		t.Fatalf("a forgiven peer should be pickable again: peer %q", current2.Peer)
+	}
+}
+
 func (f *fakeKatyd) ResolveGroup(group string) (api.ResolveResponse, error) {
 	if len(f.resolveGroup.Candidates) > 0 && group == f.resolveGroupFor {
 		return f.resolveGroup, nil

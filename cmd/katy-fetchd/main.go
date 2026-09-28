@@ -59,6 +59,12 @@ func run() error {
 			defaultPoll = parsed
 		}
 	}
+	defaultStrikes := 0
+	if raw := os.Getenv("KATYFETCHD_PEER_STRIKES"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			defaultStrikes = parsed
+		}
+	}
 
 	socket := flag.String("socket", defaultSocket, "unix socket path")
 	state := flag.String("state", defaultState, "want queue state file")
@@ -67,6 +73,7 @@ func run() error {
 	apiKey := flag.String("api-key", defaultKey, "slskd api key (X-API-Key)")
 	downloads := flag.String("downloads", defaultDownloads, "slskd downloads directory")
 	poll := flag.Int("poll", defaultPoll, "seconds between ticks")
+	strikes := flag.Int("peer-strikes", defaultStrikes, "drops before a peer is blacklisted (0 = default 2)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -91,9 +98,10 @@ func run() error {
 		return err
 	}
 	orchestrator := fetch.New(store, fetch.Config{
-		Slskd:        slskd.New(*slskdBase, *apiKey),
-		Katyd:        cli.Dial(*katyd),
-		DownloadsDir: *downloads,
+		Slskd:          slskd.New(*slskdBase, *apiKey),
+		Katyd:          cli.Dial(*katyd),
+		DownloadsDir:   *downloads,
+		BlacklistAfter: *strikes,
 	})
 
 	listener, err := listen(*socket)
