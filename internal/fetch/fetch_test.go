@@ -1814,3 +1814,120 @@ func TestCancelEndpointFormAndJSON(t *testing.T) {
 		t.Fatalf("form cancel should fail the want: %q", got.State)
 	}
 }
+
+func TestViewerRowStates(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "al-1"}
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer", HasFreeUploadSlot: true,
+		Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	viewerBody := func() string {
+		server := fetch.Server{Orchestrator: orchestrator}
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/viewer", nil))
+		return rec.Body.String()
+	}
+	body := viewerBody()
+	if !strings.Contains(body, "<td>yes</td>") || !strings.Contains(body, "<td>0s</td>") {
+		t.Fatalf("an active owner should read yes with waiting time: %s", body)
+	}
+
+	downloads := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, "01 - vault.flac"), make([]byte, 9), 0o644); err != nil {
+		t.Fatalf("write vault: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, "02 - orbit.flac"), make([]byte, 19), 0o644); err != nil {
+		t.Fatalf("write orbit: %v", err)
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Succeeded"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateImported {
+		t.Fatalf("setup: want should import, state %q err %q", want.State, want.Error)
+	}
+	body = viewerBody()
+	if !strings.Contains(body, "<td>done</td>") {
+		t.Fatalf("a completed owner should read done: %s", body)
+	}
+	if strings.Contains(body, "<td>yes</td>") || strings.Contains(body, "<td>0s</td>") {
+		t.Fatalf("done rows must not claim activity or waiting: %s", body)
+	}
+}
+
+func TestViewerRowFailedAfterGiveUp(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer", HasFreeUploadSlot: true,
+		Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	downloads := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, "01 - vault.flac"), make([]byte, 9), 0o644); err != nil {
+		t.Fatalf("write vault: %v", err)
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Errored",
+			Exception: strPtr("File not shared.")},
+	}}}}}
+	for i := 0; i < 4; i++ {
+		orchestrator.Tick(context.Background())
+	}
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || want.Excluded[`dir\SAETIA\02 - orbit.flac`] != "peer" {
+		t.Fatalf("setup: orbit should be excluded and searching: state %q excluded %v", want.State, want.Excluded)
+	}
+	server := fetch.Server{Orchestrator: orchestrator}
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/viewer", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "<td>failed</td>") {
+		t.Fatalf("a given-up owner should read failed while its slot waits to re-source: %s", body)
+	}
+	if strings.Contains(body, "<td>0s</td>") {
+		t.Fatalf("a failed row must not show waiting: %s", body)
+	}
+
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateFailed {
+		t.Fatalf("setup: with no other candidate the want should fail, state %q", want.State)
+	}
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/viewer", nil))
+	body = rec.Body.String()
+	if !strings.Contains(body, "<td>failed</td>") {
+		t.Fatalf("failed want rows should read failed: %s", body)
+	}
+}

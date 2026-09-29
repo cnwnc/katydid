@@ -67,10 +67,15 @@ func viewerWant(b *strings.Builder, want Want) {
 	b.WriteString("<table border=\"1\">\n")
 	b.WriteString("<tr><th>peer</th><th>files</th><th>done</th><th>enqueued</th><th>place</th><th>waiting</th></tr>\n")
 	type ownerCount struct {
-		files int
-		done  int
-		open  bool
+		files  int
+		done   int
+		failed int
 	}
+	// imported, skipped, and decided wants had every slot bound at
+	// staging time; purge has since cleared the paths, so the want
+	// state itself carries the done truth. A failed want brings
+	// nothing further, so its unbound files read failed too.
+	complete := want.State == StateImported || want.State == StateSkipped || want.State == StateNeedsPick
 	owners := map[string]*ownerCount{}
 	var order []string
 	for _, file := range want.Enqueued {
@@ -85,30 +90,49 @@ func viewerWant(b *strings.Builder, want Want) {
 			order = append(order, owner)
 		}
 		count.files++
-		if _, bound := want.Paths[file.Filename]; bound {
+		switch {
+		case complete:
 			count.done++
-		} else {
-			count.open = true
+		default:
+			if _, bound := want.Paths[file.Filename]; bound {
+				count.done++
+			} else if _, dead := want.Excluded[file.Filename]; dead || want.State == StateFailed {
+				count.failed++
+			}
 		}
 	}
 	for _, owner := range order {
 		count := owners[owner]
-		enqueued := "-"
-		if count.open {
-			enqueued = "yes"
+		dropped := false
+		for _, peer := range want.ExcludedPeers {
+			if peer == owner {
+				dropped = true
+				break
+			}
+		}
+		status := "yes"
+		switch {
+		case count.done == count.files:
+			status = "done"
+		case dropped || count.done+count.failed == count.files:
+			status = "failed"
 		}
 		place := "-"
 		if value, ok := want.PeerPlace[owner]; ok {
 			place = strconv.FormatInt(value, 10)
 		}
-		waiting := "-"
-		if since, ok := want.PeerProgress[owner]; ok {
-			waiting = time.Since(since).Round(time.Second).String()
+		waiting := ""
+		if status == "yes" {
+			if since, ok := want.PeerProgress[owner]; ok {
+				waiting = time.Since(since).Round(time.Second).String()
+			} else {
+				waiting = "-"
+			}
 		}
 		b.WriteString("<tr><td>" + html.EscapeString(owner) + "</td>" +
 			"<td>" + strconv.Itoa(count.files) + "</td>" +
 			"<td>" + strconv.Itoa(count.done) + "</td>" +
-			"<td>" + enqueued + "</td>" +
+			"<td>" + status + "</td>" +
 			"<td>" + html.EscapeString(place) + "</td>" +
 			"<td>" + html.EscapeString(waiting) + "</td></tr>\n")
 	}
