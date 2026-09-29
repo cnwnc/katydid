@@ -57,7 +57,7 @@ func (s *Server) viewer(w http.ResponseWriter, r *http.Request) {
 }
 
 // viewerWant writes one want as a heading, a per-owner transfer table, its
-// error and recent notes, then the kill hint the operator copies.
+// error and recent notes, then a kill form (HTML forms cannot DELETE).
 func viewerWant(b *strings.Builder, want Want) {
 	title := want.ReleaseArtist + " - " + want.ReleaseTitle
 	if want.ReleaseArtist == "" || want.ReleaseTitle == "" {
@@ -127,5 +127,13 @@ func viewerWant(b *strings.Builder, want Want) {
 		}
 		b.WriteString("<p>" + strings.Join(quoted, " | ") + "</p>\n")
 	}
-	b.WriteString("<p>kill: curl -X DELETE 'http://d/want?id=" + html.EscapeString(want.ID) + "'</p>\n")
+	switch want.State {
+	case StateImported, StateSkipped, StateFailed:
+		b.WriteString("<p>terminal: curl -X DELETE 'http://d/want?id=" + html.EscapeString(want.ID) + "'</p>\n")
+	default:
+		b.WriteString("<form method=\"POST\" action=\"/want/cancel\">\n")
+		b.WriteString("<input type=\"hidden\" name=\"id\" value=\"" + html.EscapeString(want.ID) + "\">\n")
+		b.WriteString("<input type=\"submit\" value=\"kill\">\n")
+		b.WriteString("</form>\n")
+	}
 }

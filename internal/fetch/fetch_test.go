@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -1664,8 +1665,8 @@ func TestViewerRendersWant(t *testing.T) {
 	if !strings.Contains(body, "a - b") {
 		t.Fatalf("missing want title: %s", body)
 	}
-	if !strings.Contains(body, "curl -X DELETE") {
-		t.Fatalf("missing kill hint: %s", body)
+	if !strings.Contains(body, `action="/want/cancel"`) || !strings.Contains(body, `type="submit"`) {
+		t.Fatalf("missing kill form: %s", body)
 	}
 	if strings.Contains(body, "<style") || strings.Contains(body, "<script") {
 		t.Fatalf("viewer must stay bare HTML: %s", body)
@@ -1769,5 +1770,47 @@ func TestStallKeepsMovingPeers(t *testing.T) {
 	want = find(t, orchestrator, want.ID)
 	if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
 		t.Fatalf("an initializing or transferring peer is not stalled: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	}
+}
+
+func TestCancelFailsActiveWant(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+
+	cancelled, err := orchestrator.Cancel(want.ID)
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if cancelled.State != fetch.StateFailed || !strings.Contains(cancelled.Error, "cancelled by operator") {
+		t.Fatalf("cancel should fail the want: state %q err %q", cancelled.State, cancelled.Error)
+	}
+
+	if _, err := orchestrator.Cancel(want.ID); err == nil {
+		t.Fatalf("cancelling a failed want should be refused")
+	}
+	if _, err := orchestrator.Cancel("nope"); err == nil {
+		t.Fatalf("cancelling an unknown id should fail")
+	}
+	// the reaper path stays available: Remove still works on it
+	if err := orchestrator.Remove(want.ID); err != nil {
+		t.Fatalf("remove after cancel: %v", err)
+	}
+}
+
+func TestCancelEndpointFormAndJSON(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	server := &fetch.Server{Orchestrator: orchestrator}
+
+	form := strings.NewReader("id=" + want.ID)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/want/cancel", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/viewer" {
+		t.Fatalf("form cancel should redirect to viewer: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if got := find(t, orchestrator, want.ID); got.State != fetch.StateFailed {
+		t.Fatalf("form cancel should fail the want: %q", got.State)
 	}
 }

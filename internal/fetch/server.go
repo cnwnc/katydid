@@ -3,6 +3,7 @@ package fetch
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 type Server struct {
@@ -40,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /wants", s.wants)
 	mux.HandleFunc("POST /wants", s.add)
 	mux.HandleFunc("GET /want", s.want)
+	mux.HandleFunc("POST /want/cancel", s.cancel)
 	mux.HandleFunc("POST /want/decide", s.decide)
 	mux.HandleFunc("DELETE /want", s.remove)
 	return mux
@@ -128,6 +130,29 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Orchestrator.Remove(id); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// cancel takes a form POST (the viewer's kill button) or JSON; a form
+// post redirects back to the list, Post/Redirect/Get style.
+func (s *Server) cancel(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, http.StatusBadRequest, "parse form: "+err.Error())
+		return
+	}
+	id := r.FormValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	if _, err := s.Orchestrator.Cancel(id); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		http.Redirect(w, r, "/viewer", http.StatusSeeOther)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

@@ -399,6 +399,39 @@ func (o *Orchestrator) Remove(id string) error {
 	return o.store.Save()
 }
 
+// Cancel force-fails a want in any active state: the operator decided
+// this download will never finish (stalled peer, dead queue). Files
+// bound to the want are purged and the want lands in failed, where
+// Remove or the reaper cleans it up. Terminal wants are refused; those
+// are Remove's business.
+func (o *Orchestrator) Cancel(id string) (Want, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	want, ok := o.store.byID(id)
+	if !ok {
+		return Want{}, fmt.Errorf("no want with id %s", id)
+	}
+	switch want.State {
+	case StateImported, StateSkipped, StateFailed:
+		return Want{}, fmt.Errorf("want %s is already %s", id, want.State)
+	}
+	// withWant's error path, inlined: it locks mu, which cancel holds
+	o.stopSearch(&want)
+	o.purgeDownloads(&want)
+	want.State = StateFailed
+	want.Error = "cancelled by operator"
+	want.Notes = append(want.Notes, "cancelled by operator")
+	o.store.put(want)
+	if err := o.store.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "fetchd: persist state: %v\n", err)
+	}
+	updated, ok := o.store.byID(id)
+	if !ok {
+		return Want{}, fmt.Errorf("no want with id %s", id)
+	}
+	return updated, nil
+}
+
 // Tick advances every active want by one step. The daemon calls it on a
 // ticker; tests call it directly.
 func (o *Orchestrator) Tick(ctx context.Context) {
