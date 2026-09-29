@@ -2010,3 +2010,81 @@ func TestBindPathsLooseMatchRequiresUniqueness(t *testing.T) {
 		t.Fatalf("two same-size near-identical candidates must fail loud, not guess: %v err %q", want.Paths, want.Error)
 	}
 }
+
+func TestBindPathsSlskdInfixRename(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("ハグ", "ゼロ")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "al-1"}
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer", HasFreeUploadSlot: true,
+		Files: []slskd.File{
+			{Filename: `dir\ALBUM\06 ハグ.flac`, Size: 9},
+			{Filename: `dir\ALBUM\10 ゼロ.flac`, Size: 19},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+	downloads := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// slskd renamed both on collision with existing files
+	for name, size := range map[string]int64{
+		"06 ハグ_639262869338775827.flac": 9,
+		"10 ゼロ_639262871880774396.flac": 19,
+	} {
+		if err := os.WriteFile(filepath.Join(downloads, name), make([]byte, size), 0o644); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateImported {
+		t.Fatalf("infix-renamed files should bind and import: state %q err %q", want.State, want.Error)
+	}
+	if len(katydFake.importDirFiles) != 1 || len(katydFake.importDirFiles[0]) != 2 {
+		t.Fatalf("staging should carry both files: %+v", katydFake.importDirFiles)
+	}
+}
+
+func TestStallDropsOwnerWithInvisibleTransfers(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"), func(cfg *fetch.Config) { cfg.StallAfter = time.Nanosecond })
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "other", Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 10},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.Peer != "peer" {
+		t.Fatalf("first pick = %q, want peer", want.Peer)
+	}
+	// the operator cancelled every transfer: the list holds nothing
+	slskdFake.downloads = nil
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || len(want.Excluded) != 2 {
+		t.Fatalf("an owner with no visible transfers should stall-drop: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "other" {
+		t.Fatalf("should re-source from other: state %q peer %q err %q", want.State, want.Peer, want.Error)
+	}
+}

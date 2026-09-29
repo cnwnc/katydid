@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -896,21 +897,44 @@ const (
 const defaultStallAfter = 10 * time.Minute
 
 // dropStalledPeers fails over owners that never started anything: an
-// owner whose transfers all still sit Queued (or vanished from the
-// list, e.g. cancelled by hand in the slskd UI) with no reported
-// queue movement for StallAfter is skipped for this want's remaining
-// files, struck like any other drop, and the want goes back to
-// searching. Files already bound from disk are never touched.
+// owner whose transfers all still sit Queued — or never appeared in
+// the list at all (enqueued and then cancelled by hand in the slskd
+// UI) — with no reported queue movement for StallAfter is skipped for
+// this want's remaining files, struck like any other drop, and the
+// want goes back to searching. Files already bound from disk are
+// never touched.
 func (o *Orchestrator) dropStalledPeers(w *Want, byOwner map[string]map[string]slskd.Transfer) error {
 	stall := o.cfg.StallAfter
 	if stall == 0 {
 		stall = defaultStallAfter
 	}
 	now := time.Now().UTC()
+	// every owner still carrying unbound files is a stall candidate,
+	// including owners whose transfers vanished from the list entirely
+	candidates := map[string]bool{}
+	for _, file := range w.Enqueued {
+		if _, bound := w.Paths[file.Filename]; bound {
+			continue
+		}
+		owner := w.Owners[file.Filename]
+		if owner == "" {
+			owner = w.Peer
+		}
+		if owner != "" {
+			candidates[owner] = true
+		}
+	}
 	dropped := []string{}
-	for owner, files := range byOwner {
+	for owner := range candidates {
+		files := byOwner[owner]
 		deadline, known := w.PeerProgress[owner]
 		if !known {
+			// first sight after enqueue or after an upgrade: start
+			// the clock instead of judging with no baseline
+			if w.PeerProgress == nil {
+				w.PeerProgress = map[string]time.Time{}
+			}
+			w.PeerProgress[owner] = now
 			continue
 		}
 		moving := false
@@ -1310,6 +1334,28 @@ func (o *Orchestrator) bindPaths(w *Want) error {
 					matches = append(matches, disk.path)
 				}
 			}
+			// slskd renames a completed download that collides with an
+			// existing file by inserting _<digits> before the
+			// extension; identical size makes it the same bytes
+			for _, disk := range inventory {
+				if disk.size != file.Size || !strings.EqualFold(filepath.Ext(disk.name), ext) {
+					continue
+				}
+				stripped := diskInfix.ReplaceAllString(disk.name, "$1$2")
+				if !strings.EqualFold(stripped, name) {
+					continue
+				}
+				dup := false
+				for _, existing := range matches {
+					if existing == disk.path {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					matches = append(matches, disk.path)
+				}
+			}
 			if len(matches) > 1 {
 				ambiguous = append(ambiguous, fmt.Sprintf("%s found at %s and %s", name, matches[0], matches[1]))
 				continue
@@ -1364,6 +1410,10 @@ func (o *Orchestrator) bindPaths(w *Want) error {
 	w.StagingDir = stage
 	return nil
 }
+
+// diskInfix strips slskd's collision rename: name_<digits>.ext was
+// completed as name.ext.
+var diskInfix = regexp.MustCompile(`^(.*)_[0-9]+(\.[^.]+)$`)
 
 // foldName reduces a filename to its comparable skeleton: fullwidth
 // forms to ASCII, NBSP and ideographic space to space, lowercased.
