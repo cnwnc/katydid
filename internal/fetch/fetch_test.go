@@ -1931,3 +1931,82 @@ func TestViewerRowFailedAfterGiveUp(t *testing.T) {
 		t.Fatalf("failed want rows should read failed: %s", body)
 	}
 }
+
+func TestBindPathsUnicodeTrivia(t *testing.T) {
+	// 弱虫モンブラン composed (U+30D6) vs decomposed (U+30D5 + U+3099)
+	nfc := "03 弱虫モンブラン.flac"
+	nfd := "03 弱虫モ" + "ン" + "フ\u3099ラン.flac"
+	if nfd == nfc {
+		t.Fatalf("test fixture must not already be equal")
+	}
+	// fullwidth parens vs ASCII, tiny suffix so the title still matches
+	wide := "07 アンコール（R）.flac"
+	ascii := "07 アンコール (R).flac"
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("弱虫モンブラン", "アンコール")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "al-1"}
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer", HasFreeUploadSlot: true,
+		Files: []slskd.File{
+			{Filename: `dir\SAETIA\` + nfc, Size: 9},
+			{Filename: `dir\SAETIA\` + wide, Size: 19},
+		},
+	}}
+	orchestrator.Tick(context.Background())
+
+	downloads := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, nfd), make([]byte, 9), 0o644); err != nil {
+		t.Fatalf("write nfd file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, ascii), make([]byte, 19), 0o644); err != nil {
+		t.Fatalf("write ascii-paren file: %v", err)
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateImported {
+		t.Fatalf("both unicode-variant files should bind and import: state %q paths %v err %q", want.State, want.Paths, want.Error)
+	}
+	if len(katydFake.imported) != 1 || len(katydFake.importDirFiles) != 1 || len(katydFake.importDirFiles[0]) != 2 {
+		t.Fatalf("staging should carry both bound files: %+v", katydFake.importDirFiles)
+	}
+}
+
+func TestBindPathsLooseMatchRequiresUniqueness(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("弱虫モンブラン")
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{
+		Username: "peer", HasFreeUploadSlot: true,
+		Files: []slskd.File{{Filename: `dir\SAETIA\03 弱虫モンブラン.flac`, Size: 9}},
+	}}
+	orchestrator.Tick(context.Background())
+	downloads := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	twin := "03 弱虫モ" + "ン" + "フ\u3099ラン.flac"
+	for _, name := range []string{twin, "03 弱虫モンブラン (2).flac"} {
+		if err := os.WriteFile(filepath.Join(downloads, name), make([]byte, 9), 0o644); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if len(want.Paths) != 0 || want.Error == "" || !strings.Contains(want.Error, "delete the stale copy") {
+		t.Fatalf("two same-size near-identical candidates must fail loud, not guess: %v err %q", want.Paths, want.Error)
+	}
+}

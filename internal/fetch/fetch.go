@@ -1253,35 +1253,67 @@ func (o *Orchestrator) bindPaths(w *Want) error {
 	missing := []string{}
 	ambiguous := []string{}
 	found := map[string]string{}
+	// one inventory walk: exact binding first, then a loose second
+	// pass for names that differ only in unicode trivia
+	type diskFile struct {
+		name string
+		size int64
+		path string
+	}
+	inventory := []diskFile{}
+	err := filepath.WalkDir(o.cfg.DownloadsDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			// a not-yet-existing downloads tree holds nothing; that
+			// is the normal state before any download lands
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		inventory = append(inventory, diskFile{name: entry.Name(), size: info.Size(), path: path})
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("scan downloads %s: %w", o.cfg.DownloadsDir, err)
+	}
 	for _, file := range w.Enqueued {
-		name := strings.ToLower(filepath.Base(remoteName(file.Filename)))
+		name := filepath.Base(remoteName(file.Filename))
 		if _, bound := w.Paths[file.Filename]; bound {
 			continue
 		}
 		var matches []string
-		err := filepath.WalkDir(o.cfg.DownloadsDir, func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				// a not-yet-existing downloads tree holds nothing; that
-				// is the normal state before any download lands
-				if os.IsNotExist(err) {
-					return nil
+		for _, disk := range inventory {
+			if disk.size == file.Size && strings.EqualFold(disk.name, name) {
+				matches = append(matches, disk.path)
+			}
+		}
+		if len(matches) == 0 {
+			// peers differ in unicode trivia that renders identically:
+			// composed vs decomposed dakuten, fullwidth parens, NBSP.
+			// A same-size same-extension file whose folded name is
+			// nearly identical is the same download; uniqueness is
+			// required so a size collision cannot bind the wrong file
+			folded := foldName(name)
+			ext := strings.ToLower(filepath.Ext(name))
+			for _, disk := range inventory {
+				if disk.size != file.Size || !strings.EqualFold(filepath.Ext(disk.name), ext) {
+					continue
 				}
-				return err
+				if match.Similarity(folded, foldName(disk.name)) >= 0.8 {
+					matches = append(matches, disk.path)
+				}
 			}
-			if entry.IsDir() || !strings.EqualFold(entry.Name(), name) {
-				return nil
+			if len(matches) > 1 {
+				ambiguous = append(ambiguous, fmt.Sprintf("%s found at %s and %s", name, matches[0], matches[1]))
+				continue
 			}
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			if info.Size() == file.Size {
-				matches = append(matches, path)
-			}
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("scan downloads %s: %w", o.cfg.DownloadsDir, err)
 		}
 		switch {
 		case len(matches) == 1:
@@ -1331,6 +1363,25 @@ func (o *Orchestrator) bindPaths(w *Want) error {
 	}
 	w.StagingDir = stage
 	return nil
+}
+
+// foldName reduces a filename to its comparable skeleton: fullwidth
+// forms to ASCII, NBSP and ideographic space to space, lowercased.
+// Composed-vs-decomposed trivia is left for match.Similarity, whose
+// normalize applies NFC — a decomposed dakuten composes there, so the
+// pair compares identical instead of a mark short.
+func foldName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 0xFF01 && r <= 0xFF5E:
+			r -= 0xFEE0
+		case r == 0x3000 || r == 0x00A0:
+			r = ' '
+		}
+		b.WriteRune(r)
+	}
+	return strings.ToLower(b.String())
 }
 
 // stageFiles assembles the handoff directory: one symlink per bound
