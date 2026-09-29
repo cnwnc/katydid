@@ -35,6 +35,7 @@ type wantsResponse struct {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /viewer", s.viewer)
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /wants", s.wants)
 	mux.HandleFunc("POST /wants", s.add)

@@ -65,6 +65,12 @@ func run() error {
 			defaultStrikes = parsed
 		}
 	}
+	defaultStall := time.Duration(0)
+	if raw := os.Getenv("KATYFETCHD_STALL"); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			defaultStall = parsed
+		}
+	}
 
 	socket := flag.String("socket", defaultSocket, "unix socket path")
 	state := flag.String("state", defaultState, "want queue state file")
@@ -74,6 +80,7 @@ func run() error {
 	downloads := flag.String("downloads", defaultDownloads, "slskd downloads directory")
 	poll := flag.Int("poll", defaultPoll, "seconds between ticks")
 	strikes := flag.Int("peer-strikes", defaultStrikes, "drops before a peer is blacklisted (0 = default 2)")
+	stall := flag.Duration("stall", defaultStall, "peer stall window before failover (0 = default 10m)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -102,6 +109,7 @@ func run() error {
 		Katyd:          cli.Dial(*katyd),
 		DownloadsDir:   *downloads,
 		BlacklistAfter: *strikes,
+		StallAfter:     *stall,
 	})
 
 	listener, err := listen(*socket)

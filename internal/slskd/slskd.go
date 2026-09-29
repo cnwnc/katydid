@@ -246,6 +246,13 @@ func TransferSucceeded(state string) bool {
 	return HasState(state, "Succeeded")
 }
 
+// TransferStarted reports whether a transfer ever left the queue:
+// initializing, transferring, and every terminal state mean the peer
+// actually responded to us.
+func TransferStarted(state string) bool {
+	return !HasState(state, "Queued")
+}
+
 // TransferFailed reports whether a terminal transfer ended in a failure category.
 func TransferFailed(state string) bool {
 	for _, flag := range []string{"Errored", "Rejected", "Aborted", "Cancelled", "TimedOut"} {

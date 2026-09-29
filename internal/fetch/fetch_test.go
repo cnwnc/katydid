@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1530,7 +1531,6 @@ func TestPeerBlacklistedAfterTwoDrops(t *testing.T) {
 	slskdFake := newFakeSlskd()
 	orchestrator, want := twoPeerWant(t, slskdFake)
 	spec := fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""}
-
 	blackRefusePeer(slskdFake)
 	orchestrator.Tick(context.Background())
 	orchestrator.Tick(context.Background())
@@ -1641,4 +1641,133 @@ func (f *fakeKatyd) ResolveGroup(group string) (api.ResolveResponse, error) {
 		return f.resolveGroup, nil
 	}
 	return api.ResolveResponse{}, errors.New("no such group fixture")
+}
+
+func TestViewerRendersWant(t *testing.T) {
+	orchestrator, _ := harness(t, newFakeSlskd(), &fakeKatyd{})
+	if _, err := orchestrator.Add(fetch.Spec{Artist: "a", Album: "b"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	server := fetch.Server{Orchestrator: orchestrator}
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/viewer", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("content type = %q, want text/html", ct)
+	}
+	if !strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("missing refresh meta: %s", body)
+	}
+	if !strings.Contains(body, "a - b") {
+		t.Fatalf("missing want title: %s", body)
+	}
+	if !strings.Contains(body, "curl -X DELETE") {
+		t.Fatalf("missing kill hint: %s", body)
+	}
+	if strings.Contains(body, "<style") || strings.Contains(body, "<script") {
+		t.Fatalf("viewer must stay bare HTML: %s", body)
+	}
+}
+
+func TestViewerEscapes(t *testing.T) {
+	orchestrator, _ := harness(t, newFakeSlskd(), &fakeKatyd{})
+	if _, err := orchestrator.Add(fetch.Spec{Artist: "A<B>", Album: "D&E"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	server := fetch.Server{Orchestrator: orchestrator}
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/viewer", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "A&lt;B&gt;") {
+		t.Fatalf("artist should be escaped: %s", body)
+	}
+	if strings.Contains(body, "A<B>") {
+		t.Fatalf("raw artist leaked: %s", body)
+	}
+}
+
+func TestStalledPeerDroppedAfterNoStart(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, _ := harness(t, slskdFake, autoTitlesResolver("vault", "orbit"), func(cfg *fetch.Config) { cfg.StallAfter = time.Nanosecond })
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "other", Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 10},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.Peer != "peer" {
+		t.Fatalf("first pick = %q, want peer", want.Peer)
+	}
+	queuedTransfers := []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Queued, Remotely"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Queued, Remotely"},
+	}}}}}
+	slskdFake.downloads = queuedTransfers
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || len(want.Excluded) != 2 {
+		t.Fatalf("an owner that never started anything should fail over: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	}
+	if want.Excluded[`dir\SAETIA\01 - vault.flac`] != "peer" {
+		t.Fatalf("exclusion should name the stalled owner: %v", want.Excluded)
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "other" {
+		t.Fatalf("should re-source from other: state %q peer %q err %q", want.State, want.Peer, want.Error)
+	}
+	if !strings.Contains(strings.Join(want.Notes, "\n"), "stalled peer dropped") {
+		t.Fatalf("the stall should be noted: %v", want.Notes)
+	}
+}
+
+func TestStallKeepsMovingPeers(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	orchestrator, want := twoPeerWant(t, slskdFake)
+	// queued but climbing: place-in-queue movement proves the peer is
+	// alive and must not be dropped
+	place := int64(100)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Queued, Remotely", PlaceInQueue: &place},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Queued, Remotely", PlaceInQueue: &place},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
+		t.Fatalf("first sight must only initialize the clocks: state %q excluded %v", want.State, want.Excluded)
+	}
+	for i := 0; i < 3; i++ {
+		place -= 10
+		orchestrator.Tick(context.Background())
+		want = find(t, orchestrator, want.ID)
+	}
+	if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
+		t.Fatalf("a moving queue position keeps the peer: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	}
+	// a peer actively transferring counts as started even stuck at one place
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Transferring", PlaceInQueue: &place},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Queued, Remotely", PlaceInQueue: &place},
+	}}}}}
+	for i := 0; i < 3; i++ {
+		orchestrator.Tick(context.Background())
+	}
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
+		t.Fatalf("an initializing or transferring peer is not stalled: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	}
 }

@@ -90,6 +90,14 @@ type Want struct {
 	AlbumID   string            `json:"album_id,omitempty"`
 	Attempts  map[string]int    `json:"attempts,omitempty"`
 	Notes     []string          `json:"notes,omitempty"`
+	// Per-peer stall tracking: PeerSince anchors each owner's first
+	// enqueue, PeerProgress is the last tick that showed movement (a
+	// transfer leaving Queued, or the reported queue position
+	// dropping), PeerPlace remembers the best position seen so a
+	// stalled front of the queue is distinguishable from a moving one.
+	PeerSince    map[string]time.Time `json:"peer_since,omitempty"`
+	PeerProgress map[string]time.Time `json:"peer_progress,omitempty"`
+	PeerPlace    map[string]int64     `json:"peer_place,omitempty"`
 }
 
 // Katyd is the slice of the katyd client the orchestrator needs.
@@ -126,6 +134,10 @@ type Config struct {
 	// BlacklistAfter is how many drops put a peer on the in-memory
 	// blacklist, skipping it in every future pick; zero means 2.
 	BlacklistAfter int
+	// StallAfter is how long an owner may show zero progress before
+	// its unbound files fail over to another peer; zero means the
+	// package default.
+	StallAfter time.Duration
 }
 
 // Store persists wants as a single atomically written JSON document; the
@@ -576,10 +588,20 @@ func (o *Orchestrator) beginSearch(ctx context.Context, want *Want) error {
 
 func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 	search, err := o.cfg.Slskd.Search(ctx, want.SearchID, true)
+	if err != nil {
+		// slskd lost the search (retention, restart); a want with
+		// live slots needs a new search to fail over into, not a
+		// failure
+		o.withWant(want, func(w *Want) error {
+			if len(w.Enqueued) == 0 {
+				return fmt.Errorf("poll search: %w", err)
+			}
+			w.SearchID = ""
+			return o.beginSearch(ctx, w)
+		})
+		return
+	}
 	o.withWant(want, func(w *Want) error {
-		if err != nil {
-			return fmt.Errorf("poll search: %w", err)
-		}
 		if !search.IsComplete {
 			if time.Since(w.UpdatedAt) > staleAfter {
 				return errors.New("search stale")
@@ -710,6 +732,20 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 			}
 			w.Enqueued = kept
 		}
+		// fresh owners get a stall clock; returning ones keep theirs
+		now := time.Now().UTC()
+		for _, owner := range w.Owners {
+			if _, seen := w.PeerSince[owner]; !seen {
+				if w.PeerSince == nil {
+					w.PeerSince = map[string]time.Time{}
+				}
+				if w.PeerProgress == nil {
+					w.PeerProgress = map[string]time.Time{}
+				}
+				w.PeerSince[owner] = now
+				w.PeerProgress[owner] = now
+			}
+		}
 		// display peer: the first owner
 		w.Peer = ""
 		for _, file := range w.Enqueued {
@@ -822,6 +858,95 @@ const (
 	maxPeers           = 5
 )
 
+// defaultStallAfter is how long a peer may show zero progress before
+// its unbound files are handed to another peer.
+const defaultStallAfter = 10 * time.Minute
+
+// dropStalledPeers fails over owners that never started anything: an
+// owner whose transfers all still sit Queued (or vanished from the
+// list, e.g. cancelled by hand in the slskd UI) with no reported
+// queue movement for StallAfter is skipped for this want's remaining
+// files, struck like any other drop, and the want goes back to
+// searching. Files already bound from disk are never touched.
+func (o *Orchestrator) dropStalledPeers(w *Want, byOwner map[string]map[string]slskd.Transfer) error {
+	stall := o.cfg.StallAfter
+	if stall == 0 {
+		stall = defaultStallAfter
+	}
+	now := time.Now().UTC()
+	dropped := []string{}
+	for owner, files := range byOwner {
+		deadline, known := w.PeerProgress[owner]
+		if !known {
+			continue
+		}
+		moving := false
+		for _, transfer := range files {
+			if slskd.TransferSucceeded(transfer.State) {
+				continue
+			}
+			if slskd.TransferStarted(transfer.State) {
+				// initializing, transferring, or already failed all
+				// mean the peer responded to us
+				moving = true
+			}
+			if transfer.PlaceInQueue != nil {
+				place := *transfer.PlaceInQueue
+				if last, ok := w.PeerPlace[owner]; !ok || place < last {
+					if w.PeerPlace == nil {
+						w.PeerPlace = map[string]int64{}
+					}
+					w.PeerPlace[owner] = place
+					moving = true
+				}
+			}
+		}
+		if moving {
+			w.PeerProgress[owner] = now
+			continue
+		}
+		if now.Sub(deadline) < stall {
+			continue
+		}
+		count := 0
+		if w.Excluded == nil {
+			w.Excluded = map[string]string{}
+		}
+		for _, file := range w.Enqueued {
+			fileOwner := w.Owners[file.Filename]
+			if fileOwner == "" {
+				fileOwner = w.Peer
+			}
+			if fileOwner != owner {
+				continue
+			}
+			if _, bound := w.Paths[file.Filename]; bound {
+				continue
+			}
+			if _, dead := w.Excluded[file.Filename]; dead {
+				continue
+			}
+			w.Excluded[file.Filename] = owner
+			count++
+		}
+		if count == 0 {
+			continue
+		}
+		o.strike(owner)
+		dropped = append(dropped, fmt.Sprintf("%s (%d file(s) never started in %s)", owner, count, now.Sub(deadline).Round(time.Second)))
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+	w.Notes = append(w.Notes, "stalled peer dropped: "+strings.Join(dropped, "; "))
+	if len(w.Excluded) >= maxPeers {
+		missing := len(w.Enqueued) - len(w.Paths)
+		return fmt.Errorf("gave up after %d file(s) exhausted their peers; %d track(s) unsourced", len(w.Excluded), missing)
+	}
+	w.State = StateSearching
+	return nil
+}
+
 func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 	users, err := o.cfg.Slskd.Downloads(ctx)
 	o.withWant(want, func(w *Want) error {
@@ -874,6 +999,9 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 					failed = append(failed, transfer)
 				}
 			}
+		}
+		if err := o.dropStalledPeers(w, byOwner); err != nil {
+			return err
 		}
 		// disk truth first: files on disk bind and import even when
 		// slskd's queue is jammed, was cleared, or still reports errors
