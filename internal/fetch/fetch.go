@@ -100,6 +100,9 @@ type Want struct {
 	PeerSince    map[string]time.Time `json:"peer_since,omitempty"`
 	PeerProgress map[string]time.Time `json:"peer_progress,omitempty"`
 	PeerPlace    map[string]int64     `json:"peer_place,omitempty"`
+	// PeerBytes is the last observed byte total per owner: movement
+	// means the total grew, never a merely non-Queued transfer row.
+	PeerBytes map[string]int64 `json:"peer_bytes,omitempty"`
 	// SlotDead records, per track slot, every owner that burned out
 	// its attempts there. Re-sources skip those pairs entirely, so a
 	// slot cannot ping-pong between the same peer and file forever.
@@ -773,8 +776,15 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 					live[file.Filename] = true
 				}
 			}
+			keptNames := map[string]bool{}
 			kept := w.Enqueued[:0]
 			for _, file := range w.Enqueued {
+				if keptNames[file.Filename] {
+					// one name, one slot: duplicate generations from
+					// earlier plans go before they wedge the count
+					continue
+				}
+				keptNames[file.Filename] = true
 				if live[file.Filename] {
 					kept = append(kept, file)
 				} else {
@@ -788,6 +798,10 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 				}
 			}
 			for _, file := range pick.plan {
+				if keptNames[file.Filename] {
+					continue
+				}
+				keptNames[file.Filename] = true
 				kept = append(kept, file)
 				w.Owners[file.Filename] = pick.owners[file.Filename]
 				w.Slots[file.Filename] = pick.slots[file.Filename]
@@ -835,6 +849,15 @@ func failoverPlan(w *Want, search *slskd.Search, blacklisted []string) (pickAssi
 		file slskd.File
 	}
 	perIndex := map[int][]candidate{}
+	// a candidate whose exact file already serves this want cannot be
+	// a replacement: planning it leaves the live slot double-booked
+	// under one name and wedges the staging count check
+	liveName := map[string]bool{}
+	for _, file := range w.Enqueued {
+		if _, dead := w.Excluded[file.Filename]; !dead {
+			liveName[file.Filename] = true
+		}
+	}
 	for _, response := range search.Responses {
 		excludedPeer := false
 		for _, peer := range append(append([]string{}, w.ExcludedPeers...), blacklisted...) {
@@ -878,7 +901,7 @@ func failoverPlan(w *Want, search *slskd.Search, blacklisted []string) (pickAssi
 		}
 		burned[deadPeer] = true
 		for _, c := range perIndex[index] {
-			if burned[c.peer] {
+			if burned[c.peer] || liveName[c.file.Filename] {
 				continue
 			}
 			options = append(options, c)
@@ -906,6 +929,10 @@ func failoverPlan(w *Want, search *slskd.Search, blacklisted []string) (pickAssi
 			if load[c.peer] > load[chosen.peer] || (load[c.peer] == load[chosen.peer] && c.peer < chosen.peer) {
 				chosen = c
 			}
+		}
+		if _, dup := plan.owners[chosen.file.Filename]; dup {
+			// one file cannot carry two slots in the same plan
+			continue
 		}
 		plan.plan = append(plan.plan, chosen.file)
 		plan.owners[chosen.file.Filename] = chosen.peer
@@ -973,16 +1000,15 @@ func (o *Orchestrator) dropStalledPeers(ctx context.Context, w *Want, byOwner ma
 			w.PeerProgress[owner] = now
 			continue
 		}
+		// movement is observable progress only: bytes actually flowing
+		// or a queue position climbing. A row that merely left the
+		// queue (Initializing, Transferring marooned at frozen bytes)
+		// is not progress — those rows never time out inside slskd, and
+		// counting them as movement resets the stall clock forever
+		bytestotal := int64(0)
 		moving := false
 		for _, transfer := range files {
-			if slskd.TransferSucceeded(transfer.State) {
-				continue
-			}
-			if slskd.TransferStarted(transfer.State) {
-				// initializing, transferring, or already failed all
-				// mean the peer responded to us
-				moving = true
-			}
+			bytestotal += transfer.BytesTransferred
 			if transfer.PlaceInQueue != nil {
 				place := *transfer.PlaceInQueue
 				if last, ok := w.PeerPlace[owner]; !ok || place < last {
@@ -994,6 +1020,13 @@ func (o *Orchestrator) dropStalledPeers(ctx context.Context, w *Want, byOwner ma
 				}
 			}
 		}
+		if w.PeerBytes == nil {
+			w.PeerBytes = map[string]int64{}
+		}
+		if last, ok := w.PeerBytes[owner]; ok && bytestotal > last {
+			moving = true
+		}
+		w.PeerBytes[owner] = bytestotal
 		if moving {
 			w.PeerProgress[owner] = now
 			continue
@@ -1077,6 +1110,27 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 		}
 		failed := []slskd.Transfer{}
+		// migration heal: a duplicate enqueued name double-books a slot
+		// and wedges the staging count check (old failovers could plan
+		// them), and exclusions for names no longer enqueued can never
+		// be swapped out — they only darken the maxPeers budget
+		{
+			enq := map[string]bool{}
+			kept := w.Enqueued[:0]
+			for _, file := range w.Enqueued {
+				if enq[file.Filename] {
+					continue
+				}
+				enq[file.Filename] = true
+				kept = append(kept, file)
+			}
+			w.Enqueued = kept
+			for name := range w.Excluded {
+				if !enq[name] {
+					delete(w.Excluded, name)
+				}
+			}
+		}
 		for _, file := range w.Enqueued {
 			owner := w.Owners[file.Filename]
 			if owner == "" {
@@ -1218,6 +1272,12 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			// nothing left to fail next tick: without a nudge the want
 			// idles in downloading until the bind window gives up on
 			// its healthy files too
+			if w.State != StateDownloading {
+				// a stall drop or peer switch already moved the want
+				// this tick; re-driving it here would double-retire
+				// the transfers it just handled
+				return nil
+			}
 			for _, file := range w.Enqueued {
 				if _, bound := w.Paths[file.Filename]; bound {
 					continue

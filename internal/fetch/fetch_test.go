@@ -1784,17 +1784,71 @@ func TestStallKeepsMovingPeers(t *testing.T) {
 	if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
 		t.Fatalf("a moving queue position keeps the peer: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
 	}
-	// a peer actively transferring counts as started even stuck at one place
-	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
-		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Transferring", PlaceInQueue: &place},
-		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Queued, Remotely", PlaceInQueue: &place},
-	}}}}}
+	// a peer actively transferring keeps its lanes only while bytes
+	// actually flow: a queue spot does not protect a stalled row
 	for i := 0; i < 3; i++ {
+		slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Transferring", BytesTransferred: int64(i + 1), PlaceInQueue: &place},
+			{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Queued, Remotely", PlaceInQueue: &place},
+		}}}}}
 		orchestrator.Tick(context.Background())
+		want = find(t, orchestrator, want.ID)
+		if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
+			t.Fatalf("flowing bytes keep the peer: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+		}
 	}
+}
+
+func TestFrozenTransferringStalls(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, _ := harness(t, slskdFake, katydFake, func(c *fetch.Config) { c.StallAfter = time.Millisecond })
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
 	want = find(t, orchestrator, want.ID)
-	if want.State != fetch.StateDownloading || len(want.Excluded) != 0 {
-		t.Fatalf("an initializing or transferring peer is not stalled: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peerA", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "peerB", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 9},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.Peer != "peerA" {
+		t.Fatalf("setup: first pick = %q", want.Peer)
+	}
+	// rows that left the queue but show no new bytes: slskd never
+	// times these out, so only the stall window can end them
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peerA", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Transferring", BytesTransferred: 3},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Initializing", BytesTransferred: 2},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	time.Sleep(5 * time.Millisecond)
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || len(want.Excluded) != 2 {
+		t.Fatalf("frozen bytes must stall the peer: state %q excluded %v err %q", want.State, want.Excluded, want.Error)
+	}
+	retired := 0
+	for _, r := range slskdFake.removed {
+		if r.user == "peerA" && r.local {
+			retired++
+		}
+	}
+	if retired != 2 {
+		t.Fatalf("the stalled peer's zombie rows must be retired with their data: %+v", slskdFake.removed)
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Peer != "peerB" {
+		t.Fatalf("the dropped pool must re-source to peerB: state %q peer %q err %q", want.State, want.Peer, want.Error)
 	}
 }
 
@@ -2401,5 +2455,65 @@ func TestPurgeSweepsAbandonedCopies(t *testing.T) {
 	}
 	if !swept {
 		t.Fatalf("the sweep should be visible in notes: %v", want.Notes)
+	}
+}
+
+func TestMigrationHealsDuplicateEnqueuedAndStaleExclusions(t *testing.T) {
+	dir := t.TempDir()
+	downloads := filepath.Join(dir, "downloads", "SAETIA")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bound := filepath.Join(downloads, "01 - vault.flac")
+	if err := os.WriteFile(bound, make([]byte, 500), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	state := fmt.Sprintf(`{
+  "schema": 1,
+  "wants": [{
+    "id": "heal1",
+    "artist": "saetia",
+    "album": "saetia",
+    "track_count": 1,
+    "track_titles": ["vault"],
+    "state": "downloading",
+    "created_at": "2026-10-02T00:00:00Z",
+    "updated_at": "2026-10-02T00:00:00Z",
+    "peer": "peerA",
+    "enqueued": [
+      {"filename": "dir\\SAETIA\\01 - vault.flac", "size": 500},
+      {"filename": "dir\\SAETIA\\01 - vault.flac", "size": 500}
+    ],
+    "paths": {"dir\\SAETIA\\01 - vault.flac": %q},
+    "owners": {"dir\\SAETIA\\01 - vault.flac": "peerA"},
+    "slots": {"dir\\SAETIA\\01 - vault.flac": 0},
+    "excluded": {"dir\\SAETIA\\ghost.flac": "gonepeer"}
+  }]
+}`, bound)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(state), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	store, err := fetch.OpenStore(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "al-1"}
+	orchestrator := fetch.New(store, fetch.Config{
+		Slskd:        slskdFake,
+		Katyd:        katydFake,
+		DownloadsDir: filepath.Join(dir, "downloads"),
+	})
+	orchestrator.Tick(context.Background())
+	want := find(t, orchestrator, "heal1")
+	if want.State != fetch.StateImported {
+		t.Fatalf("a double-booked fully-bound want must heal and import: state %q err %q", want.State, want.Error)
+	}
+	if len(want.Enqueued) != 1 || len(want.Excluded) != 0 {
+		t.Fatalf("duplicates and stale exclusions must be pruned: enq %d excluded %v", len(want.Enqueued), want.Excluded)
+	}
+	if _, err := os.Stat(bound); !os.IsNotExist(err) {
+		t.Fatalf("the import purge should have deleted the bound file: %v", err)
 	}
 }
