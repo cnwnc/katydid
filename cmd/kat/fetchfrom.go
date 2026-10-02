@@ -48,14 +48,7 @@ func runFetchFrom(katyd *cli.Client, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list wants: %w", err)
 	}
-	wanted := map[string]string{}
-	byRelease := map[string]string{}
-	for _, want := range queued {
-		wanted[wantKey(want.Artist, want.Album)] = want.ID
-		if want.ReleaseArtist != "" && want.ReleaseTitle != "" {
-			byRelease[wantKey(want.ReleaseArtist, want.ReleaseTitle)] = want.ID
-		}
-	}
+	wanted, byRelease := dedupeIndex(queued)
 
 	lines := parseAlbumList(string(raw))
 	if len(lines) == 0 {
@@ -79,6 +72,26 @@ func runFetchFrom(katyd *cli.Client, args []string) error {
 
 func wantKey(artist, album string) string {
 	return strings.ToLower(artist) + "\x00" + strings.ToLower(album)
+}
+
+// dedupeIndex maps the queued wants a list line can be skipped for:
+// typed names and resolved release names. Failed wants (operator
+// cancels included) are absent so a retried line re-queues instead of
+// being swallowed as "already queued"; imported and skipped wants
+// reflect the library and keep the skip.
+func dedupeIndex(wants []cli.WantReply) (typed, byRelease map[string]string) {
+	typed = map[string]string{}
+	byRelease = map[string]string{}
+	for _, want := range wants {
+		if want.State == "failed" {
+			continue
+		}
+		typed[wantKey(want.Artist, want.Album)] = want.ID
+		if want.ReleaseArtist != "" && want.ReleaseTitle != "" {
+			byRelease[wantKey(want.ReleaseArtist, want.ReleaseTitle)] = want.ID
+		}
+	}
+	return typed, byRelease
 }
 
 // changed reports whether a retried spelling differs from the typed
