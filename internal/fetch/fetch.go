@@ -99,6 +99,10 @@ type Want struct {
 	PeerSince    map[string]time.Time `json:"peer_since,omitempty"`
 	PeerProgress map[string]time.Time `json:"peer_progress,omitempty"`
 	PeerPlace    map[string]int64     `json:"peer_place,omitempty"`
+	// SlotDead records, per track slot, every owner that burned out
+	// its attempts there. Re-sources skip those pairs entirely, so a
+	// slot cannot ping-pong between the same peer and file forever.
+	SlotDead map[int][]string `json:"slot_dead,omitempty"`
 }
 
 // Katyd is the slice of the katyd client the orchestrator needs.
@@ -757,6 +761,11 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 				} else {
 					delete(w.Owners, file.Filename)
 					delete(w.Slots, file.Filename)
+					// the pair history lives on the slot, not the file:
+					// stale per-file entries must go with the name they
+					// described, or they darken a future same-named copy
+					delete(w.Excluded, file.Filename)
+					delete(w.Attempts, file.Filename)
 				}
 			}
 			for _, file := range pick.plan {
@@ -841,8 +850,16 @@ func failoverPlan(w *Want, search *slskd.Search, blacklisted []string) (pickAssi
 		}
 		options := []candidate{}
 		flac := []candidate{}
+		// every peer that ever burned out on this slot is off the
+		// table, not just the latest one: without the history a
+		// re-source ping-pongs between the same tired pairs
+		burned := map[string]bool{}
+		for _, peer := range w.SlotDead[index] {
+			burned[peer] = true
+		}
+		burned[deadPeer] = true
 		for _, c := range perIndex[index] {
-			if c.peer == deadPeer {
+			if burned[c.peer] {
 				continue
 			}
 			options = append(options, c)
@@ -1094,12 +1111,19 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 				w.Attempts[transfer.Filename]++
 				file := slskd.File{Filename: transfer.Filename, Size: transfer.Size}
 				if attempts := w.Attempts[transfer.Filename]; attempts > maxDownloadRetries {
-					// per-file failover: mark this file off-limits for
-					// its owner and let the next search round hand it to
-					// another peer; the rest of the pool is untouched
+					// per-file failover: mark this file off-limits for its
+					// owner and record the burned pair on the slot so a
+					// re-source can never hand the same track to the same
+					// peer again; the rest of the pool is untouched
 					owner := w.Owners[transfer.Filename]
 					if owner == "" {
 						owner = w.Peer
+					}
+					if w.SlotDead == nil {
+						w.SlotDead = map[int][]string{}
+					}
+					if slot, ok := w.Slots[transfer.Filename]; ok && !containsPeer(w.SlotDead[slot], owner) {
+						w.SlotDead[slot] = append(w.SlotDead[slot], owner)
 					}
 					if w.Excluded == nil {
 						w.Excluded = map[string]string{}
@@ -1209,6 +1233,16 @@ func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) e
 func liveFileDead(w *Want, filename string) bool {
 	_, dead := w.Excluded[filename]
 	return dead
+}
+
+// containsPeer reports whether the list already records the peer.
+func containsPeer(peers []string, peer string) bool {
+	for _, existing := range peers {
+		if existing == peer {
+			return true
+		}
+	}
+	return false
 }
 
 // failureReason extracts a transfer's exception, defaulting sensibly.

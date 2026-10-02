@@ -2088,3 +2088,76 @@ func TestStallDropsOwnerWithInvisibleTransfers(t *testing.T) {
 		t.Fatalf("should re-source from other: state %q peer %q err %q", want.State, want.Peer, want.Error)
 	}
 }
+
+func TestFailoverRemembersBurnedPairs(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	// peers A and B both carry orbit; peer A carries vault too
+	search.Responses = []slskd.Response{
+		{Username: "peerA", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "peerB", Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 10},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.Peer != "peerA" {
+		t.Fatalf("first pick = %q, want peerA", want.Peer)
+	}
+
+	// orbit fails on peerA four times: the pair burns out
+	orbitA := `dir\SAETIA\02 - orbit.flac`
+	for i := 0; i < 4; i++ {
+		slskdFake.downloads = []slskd.UserResponse{{Username: "peerA", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Queued, Remotely"},
+			{ID: "t2", Filename: orbitA, Size: 19, State: "Completed, Errored", Exception: strPtr("hard time limit")},
+		}}}}}
+		orchestrator.Tick(context.Background())
+	}
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || want.Excluded[orbitA] != "peerA" {
+		t.Fatalf("burnout should exclude and search: state %q excluded %v", want.State, want.Excluded)
+	}
+	if len(want.SlotDead[1]) != 1 || want.SlotDead[1][0] != "peerA" {
+		t.Fatalf("burned pair must be recorded on the slot: %v", want.SlotDead)
+	}
+
+	// failover must move the slot to peerB, and the stale per-file
+	// entries must be gone with the old name
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Owners[`x\saetia\02 orbit.flac`] != "peerB" {
+		t.Fatalf("slot should re-source to peerB: state %q owners %v", want.State, want.Owners)
+	}
+	if _, dead := want.Excluded[orbitA]; dead {
+		t.Fatalf("the swapped-out name must not darken the re-sourced slot: %v", want.Excluded)
+	}
+
+	// peerB burns out too; with both pairs dead the want fails loud
+	orbitB := `x\saetia\02 orbit.flac`
+	for i := 0; i < 4; i++ {
+		slskdFake.downloads = []slskd.UserResponse{{Username: "peerB", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t2", Filename: orbitB, Size: 20, State: "Completed, Errored", Exception: strPtr("hard time limit")},
+		}}}}}
+		orchestrator.Tick(context.Background())
+	}
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching {
+		t.Fatalf("peerB burnout should search: state %q", want.State)
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateFailed || !strings.Contains(want.Error, "no source left for 1 track(s)") {
+		t.Fatalf("fully burned slot must fail loud, not ping-pong: state %q err %q", want.State, want.Error)
+	}
+}
