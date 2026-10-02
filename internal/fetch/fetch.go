@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"doppel.moe/katydid/internal/api"
@@ -103,7 +104,16 @@ type Want struct {
 	// its attempts there. Re-sources skip those pairs entirely, so a
 	// slot cannot ping-pong between the same peer and file forever.
 	SlotDead map[int][]string `json:"slot_dead,omitempty"`
+	// Abandoned collects every (file, peer) pair this want gave up on
+	// or dropped: no slot owns the name anymore, but complete or
+	// partial copies may still sit in the downloads tree, so purge
+	// sweeps them by name.
+	Abandoned []slskd.File `json:"abandoned,omitempty"`
 }
+
+// Version is the git revision the flake builds stamp in via ldflags;
+// "dev" in tests and go run.
+var Version = "dev"
 
 // Katyd is the slice of the katyd client the orchestrator needs.
 type Katyd interface {
@@ -121,6 +131,7 @@ type Slskd interface {
 	Search(ctx context.Context, id string, includeResponses bool) (*slskd.Search, error)
 	DeleteSearch(ctx context.Context, id string) error
 	EnqueueDownloads(ctx context.Context, username string, files []slskd.File) error
+	RemoveDownload(ctx context.Context, username, id string, remove bool) error
 	Downloads(ctx context.Context) ([]slskd.UserResponse, error)
 }
 
@@ -718,6 +729,14 @@ func (o *Orchestrator) pollSearch(ctx context.Context, want Want) {
 		applied := []slskd.File{}
 		for peer, files := range batches {
 			if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
+				if slskd.ServerDown(err) {
+					// slskd lost its own soulseek server link: no peer is
+					// at fault, no batch can land, and burning the pool
+					// over it fails healthy wants wholesale. Hold the plan
+					// and retry when the connection returns
+					noteOnce(w, "enqueue paused: slskd server disconnected")
+					return nil
+				}
 				// slskd cannot reach the peer; that is not a dead
 				// want: the peer is out of future picks and whatever
 				// it carried re-sources next round
@@ -920,7 +939,7 @@ const defaultStallAfter = 10 * time.Minute
 // this want's remaining files, struck like any other drop, and the
 // want goes back to searching. Files already bound from disk are
 // never touched.
-func (o *Orchestrator) dropStalledPeers(w *Want, byOwner map[string]map[string]slskd.Transfer) error {
+func (o *Orchestrator) dropStalledPeers(ctx context.Context, w *Want, byOwner map[string]map[string]slskd.Transfer) error {
 	stall := o.cfg.StallAfter
 	if stall == 0 {
 		stall = defaultStallAfter
@@ -1006,6 +1025,12 @@ func (o *Orchestrator) dropStalledPeers(w *Want, byOwner map[string]map[string]s
 		if count == 0 {
 			continue
 		}
+		// the stalled owner's remaining transfers are dead weight: a
+		// queued zombie could revive later over a tree purge already
+		// swept, so they and their partial data go now
+		for _, transfer := range byOwner[owner] {
+			o.abandonTransfer(ctx, w, owner, transfer)
+		}
 		o.strike(owner)
 		dropped = append(dropped, fmt.Sprintf("%s (%d file(s) never started in %s)", owner, count, now.Sub(deadline).Round(time.Second)))
 	}
@@ -1074,7 +1099,7 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 				}
 			}
 		}
-		if err := o.dropStalledPeers(w, byOwner); err != nil {
+		if err := o.dropStalledPeers(ctx, w, byOwner); err != nil {
 			return err
 		}
 		// disk truth first: files on disk bind and import even when
@@ -1100,7 +1125,7 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			}
 			if wholeRefusal && oneOwner {
 				summary := failureSummary(failed, len(w.Enqueued))
-				return o.switchPeer(ctx, w, summary)
+				return o.switchPeer(ctx, w, summary, failed)
 			}
 			if w.Attempts == nil {
 				w.Attempts = map[string]int{}
@@ -1132,6 +1157,10 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 						w.Excluded[transfer.Filename] = owner
 						w.Notes = append(w.Notes, fmt.Sprintf("file %s given up on %s: %s", remoteName(transfer.Filename), owner, failureReason(transfer)))
 					}
+					// the retired pair's transfer and its partial bits go at
+					// once: a queued zombie could otherwise revive over a
+					// re-swept tree later
+					o.abandonTransfer(ctx, w, owner, transfer)
 					continue
 				}
 				retry = append(retry, file)
@@ -1153,6 +1182,12 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 				retried, broken := []string{}, []string{}
 				for peer, files := range batches {
 					if err := o.cfg.Slskd.EnqueueDownloads(ctx, peer, files); err != nil {
+						if slskd.ServerDown(err) {
+							// our server link, not the peer: hold instead of
+							// marking the batch broken
+							noteOnce(w, "re-enqueue paused: slskd server disconnected")
+							continue
+						}
 						broken = append(broken, fmt.Sprintf("%s: %v", peer, err))
 						continue
 					}
@@ -1179,6 +1214,28 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 			return nil
 		}
 		if w.StagingDir == "" {
+			// a dead file whose transfer vanished from slskd's view has
+			// nothing left to fail next tick: without a nudge the want
+			// idles in downloading until the bind window gives up on
+			// its healthy files too
+			for _, file := range w.Enqueued {
+				if _, bound := w.Paths[file.Filename]; bound {
+					continue
+				}
+				if _, dead := w.Excluded[file.Filename]; !dead {
+					continue
+				}
+				owner := w.Owners[file.Filename]
+				if owner == "" {
+					owner = w.Peer
+				}
+				recordAbandoned(w, file.Filename, file.Size)
+				if transfer, visible := byOwner[owner][file.Filename]; visible && !slskd.TransferSucceeded(transfer.State) {
+					o.abandonTransfer(ctx, w, owner, transfer)
+				}
+				w.State = StateSearching
+				return nil
+			}
 			return nil
 		}
 		req := importer.Request{
@@ -1205,10 +1262,20 @@ func (o *Orchestrator) pollTransfers(ctx context.Context, want Want) {
 // staged files never switches: switching re-picks a different peer's
 // directory and the staged files are bound to slots already, so the
 // want holds instead and keeps retrying the rest on this peer.
-func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string) error {
+func (o *Orchestrator) switchPeer(ctx context.Context, w *Want, reason string, dead []slskd.Transfer) error {
 	if len(w.Paths) > 0 {
 		w.Notes = append(w.Notes, fmt.Sprintf("peer %s failed but %d file(s) already staged; holding", w.Peer, len(w.Paths)))
 		return nil
+	}
+	// the dropped peer's transfers stop here together with their
+	// partial data: a queued zombie could otherwise revive over a
+	// tree that the next failed pick already swept
+	for _, transfer := range dead {
+		owner := w.Owners[transfer.Filename]
+		if owner == "" {
+			owner = w.Peer
+		}
+		o.abandonTransfer(ctx, w, owner, transfer)
 	}
 	dropped := w.Peer
 	w.ExcludedPeers = append(w.ExcludedPeers, dropped)
@@ -1504,12 +1571,15 @@ func dropStaging(w *Want) {
 }
 
 // purgeDownloads deletes the files a finished want downloaded, any
-// download directories it emptied, and its staging dir. Files still
-// referenced by an active want survive, and only paths this want bound
-// are ever touched — never a directory wholesale, because slskd users
+// stray or partial copies it abandoned on the way (renamed
+// collisions, vanished transfers, .incomplete remainders), download
+// directories it emptied, and its staging dir. Files still referenced
+// by an active want survive, and only names this want carried are
+// ever matched — never a directory wholesale, because slskd users
 // may keep unrelated downloads there.
 func (o *Orchestrator) purgeDownloads(w *Want) {
 	shared := map[string]bool{}
+	claimed := map[string]bool{}
 	for _, other := range o.store.snapshot() {
 		if other.ID == w.ID {
 			continue
@@ -1519,6 +1589,9 @@ func (o *Orchestrator) purgeDownloads(w *Want) {
 		default:
 			for _, path := range other.Paths {
 				shared[path] = true
+			}
+			for _, file := range other.Enqueued {
+				claimed[foldName(filepath.Base(remoteName(file.Filename)))] = true
 			}
 		}
 	}
@@ -1535,10 +1608,72 @@ func (o *Orchestrator) purgeDownloads(w *Want) {
 			fmt.Fprintf(os.Stderr, "fetchd: purge %s: %v\n", path, err)
 		}
 	}
+	// the sweep: every name this want ever carried — enqueued or
+	// abandoned — owns any leftover copy on disk, at any size, since
+	// partials do not bind and renamed collisions do not match
+	swept, freed := 0, int64(0)
+	names := map[string]bool{}
+	for _, file := range w.Enqueued {
+		names[foldName(filepath.Base(remoteName(file.Filename)))] = true
+	}
+	for _, file := range w.Abandoned {
+		names[foldName(filepath.Base(remoteName(file.Filename)))] = true
+	}
+	if len(names) > 0 {
+		_ = filepath.WalkDir(o.cfg.DownloadsDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			if entry.IsDir() || shared[path] {
+				return nil
+			}
+			base := entry.Name()
+			if strings.EqualFold(filepath.Ext(base), ".incomplete") {
+				base = strings.TrimSuffix(base, filepath.Ext(base))
+			}
+			folded := foldName(diskInfix.ReplaceAllString(base, "$1$2"))
+			// a partial-stage or renamed copy only differs in unicode
+			// trivia: the same loose pass binding uses decides it
+			if !names[folded] {
+				ext := filepath.Ext(base)
+				matched := false
+				for name := range names {
+					if match.Similarity(name, folded) >= 0.8 && strings.EqualFold(filepath.Ext(name), ext) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return nil
+				}
+			}
+			// a live want still waiting on a same-named file owns it
+			if claimed[folded] {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "fetchd: sweep %s: %v\n", path, err)
+				return nil
+			}
+			swept++
+			freed += info.Size()
+			dirs[filepath.Dir(path)] = true
+			return nil
+		})
+	}
 	for dir := range dirs {
 		for dir != o.cfg.DownloadsDir && strings.HasPrefix(dir, o.cfg.DownloadsDir) {
 			if err := os.Remove(dir); err != nil {
-				if !os.IsNotExist(err) {
+				// a directory holding unrelated or other wants' files is
+				// not a leak; anything else must be loud
+				if !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTEMPTY) {
 					fmt.Fprintf(os.Stderr, "fetchd: purge dir %s: %v\n", dir, err)
 				}
 				break
@@ -1548,6 +1683,129 @@ func (o *Orchestrator) purgeDownloads(w *Want) {
 	}
 	dropStaging(w)
 	w.Paths = nil
+	o.abandonLiveTransfers(w)
+	w.Abandoned = nil
+	if swept > 0 {
+		w.Notes = append(w.Notes, fmt.Sprintf("swept %d stray download file(s), %s", swept, humanBytes(freed)))
+	}
+}
+
+// abandonLiveTransfers removes the want's remaining slskd transfer
+// entries together with their partial data: a transfer left queued
+// when a want dies can still complete days later, littering a tree
+// that purge already swept. Transfers other active wants hold are
+// never touched.
+func (o *Orchestrator) abandonLiveTransfers(w *Want) {
+	if len(w.Enqueued) == 0 && len(w.Abandoned) == 0 {
+		return
+	}
+	names := map[string]bool{}
+	for _, file := range w.Enqueued {
+		names[file.Filename] = true
+	}
+	for _, file := range w.Abandoned {
+		names[file.Filename] = true
+	}
+	live := map[string]bool{}
+	for _, other := range o.store.snapshot() {
+		if other.ID == w.ID {
+			continue
+		}
+		switch other.State {
+		case StateImported, StateSkipped, StateFailed:
+		default:
+			for filename, owner := range other.Owners {
+				live[owner+"\x00"+filename] = true
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	users, err := o.cfg.Slskd.Downloads(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fetchd: abandon transfers %s: %v\n", w.ID, err)
+		return
+	}
+	removed := 0
+	for _, user := range users {
+		for _, directory := range user.Directories {
+			for _, transfer := range directory.Files {
+				if !names[transfer.Filename] || live[user.Username+"\x00"+transfer.Filename] {
+					continue
+				}
+				if err := o.cfg.Slskd.RemoveDownload(ctx, user.Username, transfer.ID, true); err == nil {
+					removed++
+				}
+			}
+		}
+	}
+	if removed > 0 {
+		w.Notes = append(w.Notes, fmt.Sprintf("dropped %d queued transfer(s)", removed))
+	}
+}
+
+// abandonTransfer retires a (file, peer) pair: its slskd entry and
+// partial data are freed right away, and the name joins the sweep
+// set for the terminal purge.
+func (o *Orchestrator) abandonTransfer(ctx context.Context, w *Want, owner string, transfer slskd.Transfer) {
+	recordAbandoned(w, transfer.Filename, transfer.Size)
+	if transfer.ID == "" {
+		return
+	}
+	if err := o.cfg.Slskd.RemoveDownload(ctx, owner, transfer.ID, true); err != nil && !slskd.ServerDown(err) {
+		fmt.Fprintf(os.Stderr, "fetchd: abandon transfer %s from %s: %v\n", remoteName(transfer.Filename), owner, err)
+	}
+}
+
+// recordAbandoned adds a file to the want's sweep set: no slot owns
+// the name anymore, so any copy left on disk is a stray.
+func recordAbandoned(w *Want, filename string, size int64) {
+	for _, file := range w.Abandoned {
+		if file.Filename == filename {
+			return
+		}
+	}
+	w.Abandoned = append(w.Abandoned, slskd.File{Filename: filename, Size: size})
+}
+
+// noteOnce appends a note unless it would repeat the previous one:
+// ticking loops (slskd down, enqueue retries) would otherwise bloat
+// state a note at a time.
+func noteOnce(w *Want, note string) {
+	if len(w.Notes) > 0 && w.Notes[len(w.Notes)-1] == note {
+		return
+	}
+	w.Notes = append(w.Notes, note)
+}
+
+// humanBytes renders a byte count for notes and the viewer.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+// DownloadsBytes sums the downloads tree: on the tmpfs mount it is
+// ram the queue is spending, and the viewer surfaces it so leaks are
+// visible at a glance.
+func (o *Orchestrator) DownloadsBytes() int64 {
+	var total int64
+	_ = filepath.WalkDir(o.cfg.DownloadsDir, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if info, infoErr := entry.Info(); infoErr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // pickSource chooses the peer directory that best matches the release.

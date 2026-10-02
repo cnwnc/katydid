@@ -16,6 +16,7 @@
           version = "0.1.0";
           src = self;
           subPackages = [ "cmd/kat" "cmd/katyd" "cmd/katy-fetchd" "cmd/katy-discordd" ];
+          ldflags = [ "-s -w" "-X doppel.moe/katydid/internal/fetch.Version=${self.shortRev or self.dirtyShortRev or "dev"}" ];
           env.CGO_ENABLED = "0";
           vendorHash = null;
           doCheck = true;

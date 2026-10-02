@@ -27,6 +27,12 @@ type fakeSlskd struct {
 	createErr   error
 	enqueuedSeq []string
 	failEnqueue map[string]error
+	removed     []removedTransfer
+}
+
+type removedTransfer struct {
+	user, id string
+	local    bool
 }
 
 func newFakeSlskd() *fakeSlskd {
@@ -66,6 +72,25 @@ func (f *fakeSlskd) EnqueueDownloads(_ context.Context, username string, files [
 
 func (f *fakeSlskd) Downloads(_ context.Context) ([]slskd.UserResponse, error) {
 	return f.downloads, nil
+}
+
+func (f *fakeSlskd) RemoveDownload(_ context.Context, username, id string, remove bool) error {
+	f.removed = append(f.removed, removedTransfer{user: username, id: id, local: remove})
+	for _, user := range f.downloads {
+		if user.Username != username {
+			continue
+		}
+		for _, dir := range user.Directories {
+			kept := dir.Files[:0]
+			for _, transfer := range dir.Files {
+				if transfer.ID != id {
+					kept = append(kept, transfer)
+				}
+			}
+			dir.Files = kept
+		}
+	}
+	return nil
 }
 
 type fakeKatyd struct {
@@ -2159,5 +2184,222 @@ func TestFailoverRemembersBurnedPairs(t *testing.T) {
 	want = find(t, orchestrator, want.ID)
 	if want.State != fetch.StateFailed || !strings.Contains(want.Error, "no source left for 1 track(s)") {
 		t.Fatalf("fully burned slot must fail loud, not ping-pong: state %q err %q", want.State, want.Error)
+	}
+}
+
+func TestVanishedDeadFileGoesSearching(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "gate", "orbit")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peerA", HasFreeUploadSlot: true, Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+		{Filename: `dir\SAETIA\02 - gate.flac`, Size: 29},
+		{Filename: `dir\SAETIA\03 - orbit.flac`, Size: 19},
+	}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading {
+		t.Fatalf("setup: want should download: state %q err %q", want.State, want.Error)
+	}
+	// orbit fails three times while the other slots are invisible; on
+	// the fourth failure it burns out while gate fails for the first
+	// time and is re-enqueued, so the want stays downloading with a
+	// dead file aboard
+	gate := `dir\SAETIA\02 - gate.flac`
+	orbit := `dir\SAETIA\03 - orbit.flac`
+	for i := 0; i < 3; i++ {
+		slskdFake.downloads = []slskd.UserResponse{{Username: "peerA", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+			{ID: "t3", Filename: orbit, Size: 19, State: "Completed, Errored", Exception: strPtr("hard time limit")},
+		}}}}}
+		orchestrator.Tick(context.Background())
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peerA", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t2", Filename: gate, Size: 29, State: "Completed, Errored", Exception: strPtr("peer busy")},
+		{ID: "t3", Filename: orbit, Size: 19, State: "Completed, Errored", Exception: strPtr("hard time limit")},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading {
+		t.Fatalf("a live retry keeps the want downloading: state %q", want.State)
+	}
+	if want.Excluded[orbit] != "peerA" {
+		t.Fatalf("orbit should be given up: %v", want.Excluded)
+	}
+	retired := false
+	for _, r := range slskdFake.removed {
+		if r.user == "peerA" && r.id == "t3" && r.local {
+			retired = true
+		}
+	}
+	if !retired {
+		t.Fatalf("give-up must retire the transfer with its local data: %+v", slskdFake.removed)
+	}
+	// the dead pair's rows vanish from slskd's view (operator cleanup,
+	// restart): nothing is left to fail next tick, so the dead file
+	// itself must push the want into a resourcing round
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peerA", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Queued, Remotely"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching {
+		t.Fatalf("a dead file with nothing left to fail must nudge the want to searching: state %q", want.State)
+	}
+	for _, r := range slskdFake.removed {
+		if r.id == "t1" {
+			t.Fatalf("a healthy queued slot must not be retired: %+v", slskdFake.removed)
+		}
+	}
+}
+
+func TestStallDropCancelsQueuedTransfers(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	orchestrator, _ := harness(t, slskdFake, katydFake, func(c *fetch.Config) { c.StallAfter = time.Millisecond })
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{
+		{Username: "peerA", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+			{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+		}},
+		{Username: "peerB", HasFreeUploadSlot: true, Files: []slskd.File{
+			{Filename: `x\saetia\01 vault.flac`, Size: 9},
+			{Filename: `x\saetia\02 orbit.flac`, Size: 20},
+		}},
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.Peer != "peerA" {
+		t.Fatalf("setup: first pick = %q", want.Peer)
+	}
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peerA", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Queued, Remotely"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Queued, Remotely"},
+	}}}}}
+	time.Sleep(5 * time.Millisecond)
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching {
+		t.Fatalf("a stalled owner must be dropped: state %q", want.State)
+	}
+	for _, id := range []string{"t1", "t2"} {
+		retired := false
+		for _, r := range slskdFake.removed {
+			if r.user == "peerA" && r.id == id && r.local {
+				retired = true
+			}
+		}
+		if !retired {
+			t.Fatalf("stall-drop must retire queued transfer %s with its data: %+v", id, slskdFake.removed)
+		}
+	}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading || want.Owners[`x\saetia\01 vault.flac`] != "peerB" {
+		t.Fatalf("the dropped pool must re-source to peerB: state %q owners %v", want.State, want.Owners)
+	}
+}
+
+func TestServerDownHoldsPeers(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault")
+	orchestrator, _ := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+	}}}
+	slskdFake.failEnqueue = map[string]error{"peer": fmt.Errorf(
+		`POST /api/v0/transfers/downloads/peer: status 500: "The server connection must be connected and logged in to fetch user endpoint (currently: Disconnected)"`)}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateSearching || len(want.ExcludedPeers) != 0 {
+		t.Fatalf("a slskd outage is not the peer's fault: state %q excluded %v", want.State, want.ExcludedPeers)
+	}
+	if !strings.Contains(strings.Join(want.Notes, ";"), "slskd server disconnected") {
+		t.Fatalf("the outage should be visible once: %v", want.Notes)
+	}
+	delete(slskdFake.failEnqueue, "peer")
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateDownloading {
+		t.Fatalf("the plan must apply once the link returns: state %q err %q", want.State, want.Error)
+	}
+}
+
+func TestPurgeSweepsAbandonedCopies(t *testing.T) {
+	slskdFake := newFakeSlskd()
+	katydFake := autoTitlesResolver("vault", "orbit")
+	katydFake.importResult = importer.Result{Status: "imported", AlbumID: "al-1"}
+	orchestrator, root := harness(t, slskdFake, katydFake)
+	want, _ := orchestrator.Add(fetch.Spec{Artist: "saetia", Album: "saetia", Year: 0, GroupID: ""})
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	search := slskdFake.searches[want.SearchID]
+	search.IsComplete = true
+	search.Responses = []slskd.Response{{Username: "peer", HasFreeUploadSlot: true, Files: []slskd.File{
+		{Filename: `dir\SAETIA\01 - vault.flac`, Size: 9},
+		{Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19},
+	}}}
+	orchestrator.Tick(context.Background())
+	// the copies that bind, a renamed collision, a partial, and one
+	// file the want never carried: only the last one belongs to anyone
+	// else and must survive
+	bound := filepath.Join(root, "downloads", "SAETIA")
+	strays := filepath.Join(root, "downloads", "other-user")
+	if err := os.MkdirAll(bound, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(strays, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	os.WriteFile(filepath.Join(bound, "01 - vault.flac"), make([]byte, 9), 0o644)
+	os.WriteFile(filepath.Join(bound, "02 - orbit.flac"), make([]byte, 19), 0o644)
+	os.WriteFile(filepath.Join(strays, "01 - vault.flac"), make([]byte, 5), 0o644)
+	os.WriteFile(filepath.Join(strays, "01 - vault_123456789012345678.flac"), make([]byte, 5), 0o644)
+	os.WriteFile(filepath.Join(strays, "02 - orbit.flac.incomplete"), make([]byte, 6), 0o644)
+	os.WriteFile(filepath.Join(strays, "unrelated bootleg.flac"), make([]byte, 4), 0o644)
+	slskdFake.downloads = []slskd.UserResponse{{Username: "peer", Directories: []slskd.DirectoryResponse{{Files: []slskd.Transfer{
+		{ID: "t1", Filename: `dir\SAETIA\01 - vault.flac`, Size: 9, State: "Completed, Succeeded"},
+		{ID: "t2", Filename: `dir\SAETIA\02 - orbit.flac`, Size: 19, State: "Completed, Succeeded"},
+	}}}}}
+	orchestrator.Tick(context.Background())
+	want = find(t, orchestrator, want.ID)
+	if want.State != fetch.StateImported {
+		t.Fatalf("setup: want should import: state %q err %q", want.State, want.Error)
+	}
+	for _, stray := range []string{
+		filepath.Join(bound, "01 - vault.flac"),
+		filepath.Join(strays, "01 - vault.flac"),
+		filepath.Join(strays, "01 - vault_123456789012345678.flac"),
+		filepath.Join(strays, "02 - orbit.flac.incomplete"),
+	} {
+		if _, err := os.Stat(stray); !os.IsNotExist(err) {
+			t.Fatalf("stray %s should be swept by the import purge: %v", stray, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(strays, "unrelated bootleg.flac")); err != nil {
+		t.Fatalf("a file the want never carried must survive the sweep: %v", err)
+	}
+	swept := false
+	for _, note := range want.Notes {
+		if strings.Contains(note, "swept") {
+			swept = true
+		}
+	}
+	if !swept {
+		t.Fatalf("the sweep should be visible in notes: %v", want.Notes)
 	}
 }

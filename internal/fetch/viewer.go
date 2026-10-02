@@ -50,6 +50,7 @@ func (s *Server) viewer(w http.ResponseWriter, r *http.Request) {
 			viewerWant(&b, want)
 		}
 	}
+	b.WriteString("<p>katy-fetchd " + html.EscapeString(Version) + "; downloads tree " + html.EscapeString(humanBytes(s.Orchestrator.DownloadsBytes())) + "</p>\n")
 	b.WriteString("</body>\n</html>\n")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

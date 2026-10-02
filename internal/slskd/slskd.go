@@ -262,3 +262,17 @@ func TransferFailed(state string) bool {
 	}
 	return false
 }
+
+// ServerDown reports whether err is slskd blaming its own soulseek
+// server link ("must be connected and logged in", "currently:
+// Disconnected"), not any particular peer: no enqueue can succeed
+// until the link returns, and treating it as a per-peer failure burns
+// peer pools wholesale during one outage.
+func ServerDown(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "must be connected and logged in") ||
+		strings.Contains(msg, "currently: Disconnected")
+}

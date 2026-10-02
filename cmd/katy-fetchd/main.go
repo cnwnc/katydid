@@ -104,6 +104,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("katy-fetchd %s\n", fetch.Version)
 	orchestrator := fetch.New(store, fetch.Config{
 		Slskd:          slskd.New(*slskdBase, *apiKey),
 		Katyd:          cli.Dial(*katyd),
